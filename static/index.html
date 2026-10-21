@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>QQ 作业助手</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">作</div><div><strong>作业助手</strong><small>QQ 邮箱 · 本机工作台</small></div></div>
+      <nav class="nav-list" aria-label="主导航">
+        <button class="nav-item active" data-view="overview"><span class="nav-symbol">▤</span>统计任务</button>
+        <button class="nav-item" data-view="roster"><span class="nav-symbol">◎</span>提交名单</button>
+      </nav>
+      <div class="side-note"><span class="online-dot"></span><span>仅按需扫描<br>不后台监控邮箱</span></div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar">
+        <div><p class="eyebrow">南京邮电大学 · 班级作业管理</p><h1 id="page-title">统计任务</h1></div>
+        <button class="account-button" id="account-open"><span class="status-dot" id="account-dot"></span><span id="account-label">连接邮箱</span><span class="chevron">⌄</span></button>
+      </header>
+
+      <section class="view active" id="view-overview">
+        <div class="workspace-grid">
+          <section class="panel criteria-panel">
+            <div class="panel-heading"><div><span class="section-kicker">新建统计</span><h2>设置本次任务</h2></div><span class="step-label">按需执行</span></div>
+            <form id="scan-form">
+              <label class="field-label" for="task-name">作业名称</label>
+              <input id="task-name" required maxlength="80" placeholder="例如：高等数学第三次作业">
+              <label class="field-label" for="assignment-label">固定作业标识 <span class="field-hint">填写后必须出现在所选检索位置</span></label>
+              <input id="assignment-label" maxlength="100" placeholder="例如：第二次数据结构作业">
+              <div class="date-row">
+                <label><span class="field-label">收件开始日期</span><input id="start-date" type="date" required></label>
+                <label><span class="field-label">收件结束日期</span><input id="end-date" type="date" required></label>
+              </div>
+              <div class="date-row">
+                <label><span class="field-label">提交截止时间</span><input id="due-at" type="datetime-local"></label>
+                <label><span class="field-label">统计班级 / 小组</span><select id="group-filter"><option value="">全部在册成员</option></select></label>
+              </div>
+              <label class="field-label" for="keywords">关键词 <span class="field-hint">可留空；多个词用逗号分隔</span></label>
+              <input id="keywords" placeholder="例如：高数, 第三次作业">
+              <div class="filter-options">
+                <div class="option-block"><span class="field-label">关键词匹配</span><div class="segmented"><label><input type="radio" name="keyword-mode" value="any" checked><span>任一关键词</span></label><label><input type="radio" name="keyword-mode" value="all"><span>全部关键词</span></label></div></div>
+                <div class="option-block"><span class="field-label">检索位置</span><div class="check-row"><label><input type="checkbox" name="keyword-field" value="subject" checked>主题</label><label><input type="checkbox" name="keyword-field" value="filename" checked>文件名</label><label><input type="checkbox" name="keyword-field" value="body">正文</label></div></div>
+                <label class="student-id-option"><input id="match-by-student-id" type="checkbox" checked><span>在所选位置中用学号匹配提交人</span></label>
+              </div>
+              <div class="privacy-callout"><span class="callout-icon">i</span><span>仅读取收件箱中符合日期、关键词的 PDF 附件。扫描结果和下载文件留在本机。</span></div>
+              <button class="primary-button" type="submit"><span>⌕</span>开始扫描并统计</button>
+            </form>
+          </section>
+
+          <section class="results-column">
+            <div class="stats-strip" id="stats-strip">
+              <div class="stat"><span>应交人数</span><strong id="stat-expected">—</strong></div>
+              <div class="stat"><span>已提交</span><strong id="stat-submitted">—</strong></div>
+              <div class="stat"><span>未提交</span><strong id="stat-missing">—</strong></div>
+              <div class="stat"><span>迟交</span><strong id="stat-late">—</strong></div>
+              <div class="stat"><span>匹配 PDF</span><strong id="stat-files">—</strong></div>
+            </div>
+            <div class="panel result-panel">
+              <div class="panel-heading result-heading"><div><span class="section-kicker" id="result-kicker">尚未运行</span><h2 id="result-title">扫描结果</h2></div><div class="result-actions" id="result-actions" hidden><button class="quiet-button" id="desktop-export-button" title="全部匹配 PDF 导出至桌面新文件夹">↥ 导出 PDF 到桌面</button><button class="quiet-button" id="export-button" title="导出统计 CSV">导出 CSV</button><button class="quiet-button" id="reminder-button" title="预览未交提醒">提醒未交</button></div></div>
+              <div id="empty-state" class="empty-state"><div class="empty-icon">⌕</div><strong>等待一次按需扫描</strong><p>设置日期和关键词后开始。扫描不会标记邮件为已读。</p></div>
+              <div id="result-content" hidden>
+                <div class="result-tabs"><button class="result-tab active" data-result-tab="members">提交状态 <span id="member-tab-count">0</span></button><button class="result-tab" data-result-tab="files">附件来源 <span id="file-tab-count">0</span></button><button class="result-tab" data-result-tab="unmatched">未匹配发件人 <span id="unmatched-tab-count">0</span></button></div>
+                <div class="tab-content active" id="tab-members"><div class="table-wrap"><table><thead><tr><th>提交人</th><th>学号</th><th>QQ 号</th><th>班级 / 小组</th><th>状态</th><th>文件</th></tr></thead><tbody id="members-table"></tbody></table></div></div>
+                <div class="tab-content" id="tab-files"><div class="toolbar-row"><label class="select-all"><input type="checkbox" id="select-all-files">全选匹配 PDF</label><button class="quiet-button" id="download-button" disabled>下载所选文件</button></div><div class="table-wrap"><table><thead><tr><th></th><th>PDF 文件</th><th>发件人</th><th>接收时间</th><th>来源主题</th></tr></thead><tbody id="files-table"></tbody></table></div></div>
+                <div class="tab-content" id="tab-unmatched"><div class="table-wrap"><table><thead><tr><th>发件地址</th><th>发件人</th><th>接收时间</th><th>主题</th><th>识别说明</th></tr></thead><tbody id="unmatched-table"></tbody></table></div><p class="table-footnote">无法唯一对应登记邮箱、QQ 号或学号的邮件不会计入任何人的提交状态。</p></div>
+              </div>
+            </div>
+            <div class="history-section"><div class="history-heading"><h2>最近统计</h2><span>本机保存</span></div><div id="task-history" class="history-list"><div class="history-empty">完成第一次扫描后，任务记录会显示在这里。</div></div></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-roster">
+        <div class="roster-header"><div><p class="eyebrow">提交人身份映射</p><h2>提交名单</h2><p class="subtle">登记 QQ 号和学号用于归属提交；邮箱地址需核实后才可发送提醒。</p></div><div class="roster-actions"><label class="quiet-button file-import">导入 CSV<input type="file" id="csv-import" accept=".csv,text/csv"></label><button class="quiet-button" id="roster-export">导出花名册</button></div></div>
+        <div class="panel roster-panel">
+          <form id="roster-form" class="roster-form">
+            <label><span>QQ 号</span><input id="roster-qq" inputmode="numeric" required placeholder="QQ 号"></label>
+            <label><span>姓名</span><input id="roster-name" required placeholder="学生姓名"></label>
+            <label><span>学号</span><input id="roster-student-id" required placeholder="学生学号"></label>
+            <label><span>班级 / 小组</span><input id="roster-group" placeholder="例如：通信 2301"></label>
+            <label class="wide-field"><span>已核实邮箱</span><input id="roster-email" type="email" placeholder="用于发送提醒"></label>
+            <label class="verify-check"><input id="roster-verified" type="checkbox"><span>邮箱已核实</span></label>
+            <button class="primary-button compact-button" type="submit">保存成员</button>
+          </form>
+          <div class="roster-toolbar"><span id="roster-count">0 位成员</span><input id="roster-search" class="search-input" placeholder="搜索姓名、QQ 号、学号或小组"></div>
+          <div class="table-wrap"><table><thead><tr><th>姓名</th><th>QQ 号</th><th>学号</th><th>班级 / 小组</th><th>邮箱</th><th>状态</th><th></th></tr></thead><tbody id="roster-table"></tbody></table></div>
+          <div class="roster-note">CSV 列名支持：qq_number / name / student_id / group_name / email / email_verified；也支持“QQ号、姓名、学号、班级、小组、邮箱、邮箱已核实”。</div>
+        </div>
+      </section>
+
+      <footer class="footer-note"><span>本机服务 · 127.0.0.1</span><span>授权码仅在当前运行期间保存在内存中</span></footer>
+    </main>
+  </div>
+
+  <dialog id="connection-dialog" class="modal">
+    <form method="dialog" class="modal-close-row"><button class="icon-button" aria-label="关闭">×</button></form>
+    <p class="eyebrow">邮箱设置</p><h2>连接 QQ 邮箱</h2><p class="subtle">使用邮箱账号和客户端授权码。请先在 QQ 邮箱开启 IMAP/SMTP 服务；授权码不会写入本机文件。</p>
+    <form id="connection-form" class="modal-form">
+      <label><span>QQ 邮箱地址</span><input id="mail-account" type="email" autocomplete="off" required placeholder="例如：12345678@qq.com"></label>
+      <label><span>客户端授权码</span><input id="mail-auth-code" type="password" autocomplete="new-password" required placeholder="不会显示或保存"></label>
+      <div class="modal-actions"><button type="button" class="quiet-button" id="disconnect-button">断开连接</button><button class="primary-button compact-button" type="submit">验证并连接</button></div>
+    </form>
+    <p class="security-warning">你之前在聊天中发送的授权码请先在 QQ 邮箱中重置，不要继续使用。</p>
+  </dialog>
+
+  <dialog id="reminder-dialog" class="modal wide-modal">
+    <form method="dialog" class="modal-close-row"><button class="icon-button" aria-label="关闭">×</button></form>
+    <p class="eyebrow">批量提醒</p><h2>未交提醒</h2><p class="subtle">仅列出未提交且邮箱已核实的成员，默认全选。取消不需要提醒的人后，点击一次发送即可。</p>
+    <div id="reminder-list" class="reminder-list"></div>
+    <div class="modal-actions"><span id="reminder-selection-count" class="subtle"></span><button class="primary-button compact-button" id="send-reminders-button" type="button">一键发送催促</button></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

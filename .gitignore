@@ -1,0 +1,17 @@
+# Local application data may contain student information and source messages.
+data/
+downloads/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# Local environment and editor files
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+*.log
+Thumbs.db
+.DS_Store
