@@ -120,10 +120,11 @@
     <p class="eyebrow">邮箱设置</p><h2>连接 QQ 邮箱</h2><p class="subtle">使用邮箱账号和客户端授权码。请先在 QQ 邮箱开启 IMAP/SMTP 服务；授权码不会写入本机文件。</p>
     <form id="connection-form" class="modal-form">
       <label><span>QQ 邮箱地址</span><input id="mail-account" type="email" autocomplete="off" required placeholder="例如：12345678@qq.com"></label>
-      <label><span>客户端授权码</span><input id="mail-auth-code" type="password" autocomplete="new-password" required placeholder="不会显示或保存"></label>
-      <div class="modal-actions"><button type="button" class="quiet-button" id="disconnect-button">断开连接</button><button class="primary-button compact-button" type="submit">验证并连接</button></div>
+      <label><span>客户端授权码</span><input id="mail-auth-code" type="password" autocomplete="new-password" required placeholder="保存在本机，仅当前 Windows 账户可解密"></label>
+      <label class="remember-row"><input type="checkbox" id="remember-account" checked><span>记住此设备，下次打开自动连接</span></label>
+      <div class="modal-actions"><button type="button" class="quiet-button" id="disconnect-button">断开并忘记</button><button class="primary-button compact-button" type="submit">验证并连接</button></div>
     </form>
-    <p class="security-warning">你之前在聊天中发送的授权码请先在 QQ 邮箱中重置，不要继续使用。</p>
+    <p class="security-warning">授权码会用当前 Windows 账户加密保存在本机（data/session.bin），不会上传、不会进仓库；不用时可点「断开并忘记」删除。</p>
   </dialog>
 
   <dialog id="reminder-dialog" class="modal wide-modal">

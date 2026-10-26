@@ -1,6 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { roster: [], tasks: [], current: null, reminderDrafts: [], rosterImportRows: [], announcementSelection: new Set(), connected: false, toastTimer: null };
+const state = { roster: [], tasks: [], current: null, reminderDrafts: [], rosterImportRows: [], announcementSelection: new Set(), connected: false, toastTimer: null, autoErrShown: false };
 
 function esc(value = '') {
   return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -55,8 +55,15 @@ async function refresh() {
   state.tasks = data.tasks;
   state.announcements = data.announcements || [];
   state.connected = data.connected;
-  $('#account-label').textContent = data.connected ? data.account : '连接邮箱';
+  $('#account-label').textContent = data.connected ? data.account : (data.has_saved ? '一键连接' : '连接邮箱');
   $('#account-dot').classList.toggle('connected', data.connected);
+  $('#account-open').title = data.connected
+    ? `已连接 ${data.account}`
+    : (data.has_saved ? `已记住 ${data.saved_account}，点击即可一键连接` : '点击连接 QQ 邮箱');
+  if (!state.autoErrShown && data.auto_state === 'error') {
+    state.autoErrShown = true;
+    toast(data.auto_error || '自动连接失败，请重新填写授权码', true);
+  }
   renderGroupFilter(data.groups);
   renderRoster();
   renderHistory();
@@ -319,10 +326,26 @@ $('#reminder-dialog').addEventListener('click', event => {
 
 $('#account-open').addEventListener('click', async () => {
   const dialog = $('#connection-dialog');
-  try {
-    const data = await api('/api/state');
-    $('#mail-account').value = data.account || '';
-  } catch { }
+  let data = null;
+  try { data = await api('/api/state'); } catch { }
+  // 已记住设备且当前未连接 → 点一下即可一键连接
+  if (data && !data.connected && data.has_saved) {
+    toast('正在用已保存的账号连接…');
+    try {
+      const result = await api('/api/auto-connect', { method: 'POST', body: {} });
+      await refresh();
+      toast(`已连接：${result.account}`);
+      return;
+    } catch (error) {
+      toast(error.message || '自动连接失败，请手动填写授权码', true);
+      $('#mail-account').value = data.saved_account || '';
+      $('#remember-account').checked = true;
+      dialog.showModal();
+      return;
+    }
+  }
+  $('#mail-account').value = (data && data.account) || '';
+  if (data && data.has_saved) $('#remember-account').checked = true;
   dialog.showModal();
 });
 
@@ -333,11 +356,12 @@ $('#connection-form').addEventListener('submit', async event => {
   try {
     const account = $('#mail-account').value.trim();
     const authCode = $('#mail-auth-code').value;
-    await api('/api/connect', { method: 'POST', body: { account, auth_code: authCode } });
+    const remember = $('#remember-account').checked;
+    await api('/api/connect', { method: 'POST', body: { account, auth_code: authCode, remember } });
     $('#mail-auth-code').value = '';
     $('#connection-dialog').close();
     await refresh();
-    toast('邮箱连接成功。授权码已留在当前运行内存中。');
+    toast(remember ? '邮箱连接成功，已记住此设备，下次打开自动连接。' : '邮箱连接成功（未记住，下次需重新输入授权码）。');
   } catch (error) { toast(error.message, true); }
   finally { setBusy(form, false); }
 });
@@ -346,7 +370,7 @@ $('#disconnect-button').addEventListener('click', async () => {
   await api('/api/disconnect', { method: 'POST', body: {} });
   $('#mail-auth-code').value = '';
   await refresh();
-  toast('已断开邮箱连接');
+  toast('已断开连接，并从本机删除了保存的凭据');
 });
 
 $('#scan-form').addEventListener('submit', async event => {

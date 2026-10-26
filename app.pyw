@@ -38,6 +38,88 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 SESSION = {"account": None, "auth_code": None}
 SESSION_LOCK = threading.Lock()
+
+# ---- 记住此设备（一键连接）----
+# 账号与授权码用 Windows DPAPI 加密后保存在 data/session.bin，
+# 只有当前 Windows 账户能解密；data/ 已在 .gitignore 中，不会进仓库。
+SESSION_FILE = DATA_DIR / "session.bin"
+SESSION_CACHE = {"saved_account": "", "auto_state": "idle", "auto_error": ""}
+
+
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    """调用 Windows DPAPI 加/解密。失败抛 OSError。"""
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    blob_in = DATA_BLOB(len(data), ctypes.cast(
+        ctypes.create_string_buffer(data, max(len(data), 1)),
+        ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    if protect:
+        crypt32.CryptProtectData.restype = wintypes.BOOL
+        crypt32.CryptProtectData.argtypes = [
+            ctypes.POINTER(DATA_BLOB), wintypes.LPCWSTR, ctypes.POINTER(DATA_BLOB),
+            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(DATA_BLOB)]
+        ok = crypt32.CryptProtectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
+    else:
+        crypt32.CryptUnprotectData.restype = wintypes.BOOL
+        crypt32.CryptUnprotectData.argtypes = [
+            ctypes.POINTER(DATA_BLOB), ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(DATA_BLOB),
+            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(DATA_BLOB)]
+        ok = crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
+    if not ok:
+        raise OSError("DPAPI 调用失败")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def save_session(account: str, auth_code: str) -> None:
+    payload = json.dumps({"account": account, "auth_code": auth_code}).encode("utf-8")
+    DATA_DIR.mkdir(exist_ok=True)
+    SESSION_FILE.write_bytes(_dpapi(payload, True))
+    SESSION_CACHE["saved_account"] = account
+
+
+def load_session() -> tuple[str, str]:
+    try:
+        data = json.loads(_dpapi(SESSION_FILE.read_bytes(), False).decode("utf-8"))
+        account = str(data.get("account") or "")
+        auth_code = str(data.get("auth_code") or "")
+        if account and auth_code:
+            SESSION_CACHE["saved_account"] = account
+            return account, auth_code
+    except Exception:
+        pass
+    return "", ""
+
+
+def clear_session() -> None:
+    try:
+        SESSION_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    SESSION_CACHE["saved_account"] = ""
+
+
+def try_login(account: str, auth_code: str) -> None:
+    client = imaplib.IMAP4_SSL("imap.qq.com", 993, timeout=20)
+    try:
+        client.login(account, auth_code)
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
 MAX_ROSTER_UPLOAD = 8 * 1024 * 1024
 MAX_ROSTER_ROWS = 1000
 MAX_ANNOUNCEMENT_RECIPIENTS = 200
@@ -702,7 +784,9 @@ class Handler(BaseHTTPRequestHandler):
                 """)]
             with SESSION_LOCK:
                 account = SESSION["account"]
-            return self.send_json({"roster": roster, "tasks": tasks, "groups": groups, "announcements": announcements, "connected": bool(account), "account": account or ""})
+            return self.send_json({"roster": roster, "tasks": tasks, "groups": groups, "announcements": announcements, "connected": bool(account), "account": account or "",
+                                   "has_saved": bool(SESSION_CACHE["saved_account"]), "saved_account": SESSION_CACHE["saved_account"],
+                                   "auto_state": SESSION_CACHE["auto_state"], "auto_error": SESSION_CACHE["auto_error"]})
         if parsed.path == "/api/status":
             with db() as conn:
                 task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
@@ -715,6 +799,8 @@ class Handler(BaseHTTPRequestHandler):
                 "running": True,
                 "connected": bool(account),
                 "account": account or "",
+                "has_saved": bool(SESSION_CACHE["saved_account"]),
+                "auto_state": SESSION_CACHE["auto_state"],
                 "task_count": task_count,
                 "roster_count": roster_count,
                 "server_time": datetime.now().isoformat(timespec="seconds"),
@@ -780,22 +866,45 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/connect":
                 account = str(data.get("account", "")).strip().lower()
                 auth_code = str(data.get("auth_code", "")).strip().replace(" ", "")
+                remember = bool(data.get("remember", True))
                 if not re.fullmatch(r"[^@\s]+@[^@\s]+", account) or not auth_code:
                     raise ValueError("请填写完整邮箱地址和客户端授权码")
-                client = imaplib.IMAP4_SSL("imap.qq.com", 993, timeout=20)
-                try:
-                    client.login(account, auth_code)
-                finally:
-                    try:
-                        client.logout()
-                    except Exception:
-                        pass
+                try_login(account, auth_code)
                 with SESSION_LOCK:
                     SESSION.update(account=account, auth_code=auth_code)
+                if remember:
+                    save_session(account, auth_code)
+                else:
+                    clear_session()
+                SESSION_CACHE["auto_state"] = "ok"
+                SESSION_CACHE["auto_error"] = ""
+                return self.send_json({"ok": True, "account": account, "remember": remember})
+            if path == "/api/auto-connect":
+                # 一键连接：用本机已保存（DPAPI 加密）的凭据直接登录
+                with SESSION_LOCK:
+                    current = SESSION["account"]
+                if current:
+                    return self.send_json({"ok": True, "account": current, "already": True})
+                account, auth_code = load_session()
+                if not account:
+                    return self.send_json({"ok": False, "error": "本机没有保存的连接信息"}, 400)
+                SESSION_CACHE["auto_state"] = "connecting"
+                try:
+                    try_login(account, auth_code)
+                except Exception as exc:
+                    SESSION_CACHE["auto_state"] = "error"
+                    SESSION_CACHE["auto_error"] = f"自动连接失败：{exc}"
+                    return self.send_json({"ok": False, "error": SESSION_CACHE["auto_error"]}, 400)
+                with SESSION_LOCK:
+                    SESSION.update(account=account, auth_code=auth_code)
+                SESSION_CACHE["auto_state"] = "ok"
+                SESSION_CACHE["auto_error"] = ""
                 return self.send_json({"ok": True, "account": account})
             if path == "/api/disconnect":
                 with SESSION_LOCK:
                     SESSION.update(account=None, auth_code=None)
+                clear_session()
+                SESSION_CACHE["auto_state"] = "idle"
                 return self.send_json({"ok": True})
             if path == "/api/announcements":
                 with SESSION_LOCK:
@@ -1280,6 +1389,24 @@ def find_port():
     return port
 
 
+def startup_auto_connect():
+    """启动时用本机保存的凭据自动连接（实现"打开即已连接"）。"""
+    account, auth_code = load_session()
+    if not account:
+        return
+    SESSION_CACHE["auto_state"] = "connecting"
+    try:
+        try_login(account, auth_code)
+    except Exception as exc:
+        SESSION_CACHE["auto_state"] = "error"
+        SESSION_CACHE["auto_error"] = f"自动连接失败：{exc}"
+        return
+    with SESSION_LOCK:
+        SESSION.update(account=account, auth_code=auth_code)
+    SESSION_CACHE["auto_state"] = "ok"
+    SESSION_CACHE["auto_error"] = ""
+
+
 def main():
     initialize()
     port = find_port()
@@ -1287,6 +1414,7 @@ def main():
         return
     server = LocalServer(("127.0.0.1", port), Handler)
     threading.Thread(target=auto_remind_loop, daemon=True).start()
+    threading.Thread(target=startup_auto_connect, daemon=True).start()
     threading.Timer(0.7, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
     server.serve_forever()
 

@@ -424,3 +424,7 @@ th { letter-spacing: .3px; }
 .auto-remind-state[data-state="sent"] { color: var(--green-dark); }
 .auto-remind-state[data-state="sent"]::before { content: "✓"; margin-right: 4px; font-weight: 700; }
 .auto-remind-state:empty { display: none; }
+
+/* 记住此设备 */
+.remember-row { display: flex; align-items: center; gap: 7px; margin: 4px 0 2px; font-size: 11px; color: #4f615a; }
+.remember-row input { flex: 0 0 auto; accent-color: var(--green); }
