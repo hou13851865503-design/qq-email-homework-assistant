@@ -36,7 +36,7 @@
                 <label><span class="field-label">收件开始日期</span><input id="start-date" type="date" required></label>
                 <label><span class="field-label">收件结束日期</span><input id="end-date" type="date" required></label>
               </div>
-              <div class="date-row">
+              <div class="date-row date-row-stack">
                 <label><span class="field-label">提交截止时间</span><input id="due-at" type="datetime-local"></label>
                 <label><span class="field-label">统计班级 / 小组</span><select id="group-filter"><option value="">全部在册成员</option></select></label>
               </div>
@@ -46,6 +46,8 @@
                 <div class="option-block"><span class="field-label">关键词匹配</span><div class="segmented"><label><input type="radio" name="keyword-mode" value="any" checked><span>任一关键词</span></label><label><input type="radio" name="keyword-mode" value="all"><span>全部关键词</span></label></div></div>
                 <div class="option-block"><span class="field-label">检索位置</span><div class="check-row"><label><input type="checkbox" name="keyword-field" value="subject" checked>主题</label><label><input type="checkbox" name="keyword-field" value="filename" checked>文件名</label><label><input type="checkbox" name="keyword-field" value="body">正文</label></div></div>
                 <label class="student-id-option"><input id="match-by-student-id" type="checkbox" checked><span>在所选位置中用学号匹配提交人</span></label>
+              <label class="student-id-option"><input id="auto-remind" type="checkbox"><span>截止后自动提醒未交成员（仅发一次，需保持邮箱连接）</span></label>
+              <span class="auto-remind-state" id="auto-remind-state" aria-live="polite"></span>
               </div>
               <div class="privacy-callout"><span class="callout-icon">i</span><span>仅读取收件箱中符合日期、关键词的 PDF 附件。扫描结果和下载文件留在本机。</span></div>
               <button class="primary-button" type="submit"><span>⌕</span>开始扫描并统计</button>
@@ -60,8 +62,23 @@
               <div class="stat"><span>迟交</span><strong id="stat-late">—</strong></div>
               <div class="stat"><span>匹配 PDF</span><strong id="stat-files">—</strong></div>
             </div>
+            <div class="panel submission-vis" id="submission-vis" hidden>
+              <div class="panel-heading"><div><span class="section-kicker">提交概览</span><h2>完成度与班级分布</h2></div></div>
+              <div class="vis-body">
+                <div class="vis-donut">
+                  <canvas id="vis-canvas" width="160" height="160" role="img" aria-label="提交状态环形图"></canvas>
+                  <div class="vis-donut-center"><strong id="vis-pct">—</strong><span>已提交</span></div>
+                </div>
+                <div class="vis-legend" id="vis-legend"></div>
+              </div>
+              <div class="vis-bar-wrap">
+                <div class="vis-bar-top"><span>总体完成度</span><span id="vis-overall">—</span></div>
+                <div class="progress-track"><div class="progress-fill" id="vis-progress"></div></div>
+              </div>
+              <div class="vis-classes" id="vis-classes"></div>
+            </div>
             <div class="panel result-panel">
-              <div class="panel-heading result-heading"><div><span class="section-kicker" id="result-kicker">尚未运行</span><h2 id="result-title">扫描结果</h2></div><div class="result-actions" id="result-actions" hidden><button class="quiet-button" id="desktop-export-button" title="全部匹配 PDF 导出至桌面新文件夹">↥ 导出 PDF 到桌面</button><button class="quiet-button" id="export-button" title="导出统计 CSV">导出 CSV</button><button class="quiet-button" id="reminder-button" title="预览未交提醒">提醒未交</button></div></div>
+              <div class="panel-heading result-heading"><div><span class="section-kicker" id="result-kicker">尚未运行</span><h2 id="result-title">扫描结果</h2><button type="button" class="auto-remind-badge" id="auto-remind-badge" hidden title="点击关闭/开启截止后自动提醒"></button></div><div class="result-actions" id="result-actions" hidden><button class="quiet-button" id="desktop-export-button" title="全部匹配 PDF 导出至桌面新文件夹">↥ 导出 PDF 到桌面</button><button class="quiet-button" id="export-button" title="导出统计 CSV">导出 CSV</button><button class="quiet-button" id="reminder-button" title="预览未交提醒">提醒未交</button></div></div>
               <div id="empty-state" class="empty-state"><div class="empty-icon">⌕</div><strong>等待一次按需扫描</strong><p>设置日期和关键词后开始。扫描不会标记邮件为已读。</p></div>
               <div id="result-content" hidden>
                 <div class="result-tabs"><button class="result-tab active" data-result-tab="members">提交状态 <span id="member-tab-count">0</span></button><button class="result-tab" data-result-tab="files">附件来源 <span id="file-tab-count">0</span></button><button class="result-tab" data-result-tab="unmatched">未匹配发件人 <span id="unmatched-tab-count">0</span></button></div>
@@ -76,7 +93,7 @@
       </section>
 
       <section class="view" id="view-roster">
-        <div class="roster-header"><div><p class="eyebrow">提交人身份映射</p><h2>提交名单</h2><p class="subtle">登记 QQ 号和学号用于归属提交；邮箱地址需核实后才可发送提醒。</p></div><div class="roster-actions"><label class="quiet-button file-import">导入 CSV<input type="file" id="csv-import" accept=".csv,text/csv"></label><button class="quiet-button" id="roster-export">导出花名册</button></div></div>
+        <div class="roster-header"><div><p class="eyebrow">提交人身份映射</p><h2>提交名单</h2><p class="subtle">登记 QQ 号和学号用于归属提交；邮箱地址需核实后才可发送提醒或通知。</p></div><div class="roster-actions"><button class="primary-button compact-button" id="announcement-open" type="button">✉ 批量通知</button><label class="quiet-button file-import">导入名单 Word / PDF<input type="file" id="document-import" accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label><label class="quiet-button file-import">导入 CSV<input type="file" id="csv-import" accept=".csv,text/csv"></label><button class="quiet-button" id="roster-export">导出花名册</button></div></div>
         <div class="panel roster-panel">
           <form id="roster-form" class="roster-form">
             <label><span>QQ 号</span><input id="roster-qq" inputmode="numeric" required placeholder="QQ 号"></label>
@@ -89,8 +106,9 @@
           </form>
           <div class="roster-toolbar"><span id="roster-count">0 位成员</span><input id="roster-search" class="search-input" placeholder="搜索姓名、QQ 号、学号或小组"></div>
           <div class="table-wrap"><table><thead><tr><th>姓名</th><th>QQ 号</th><th>学号</th><th>班级 / 小组</th><th>邮箱</th><th>状态</th><th></th></tr></thead><tbody id="roster-table"></tbody></table></div>
-          <div class="roster-note">CSV 列名支持：qq_number / name / student_id / group_name / email / email_verified；也支持“QQ号、姓名、学号、班级、小组、邮箱、邮箱已核实”。</div>
+          <div class="roster-note">Word / PDF 表格需包含“姓名、学号、QQ号”列；分类列可用“班级、小组或分类”。仅支持 .docx 和可选择文字的 PDF。</div>
         </div>
+        <div class="announcement-history-section"><div class="history-heading"><h2>最近通知</h2><span>发送记录保存在本机</span></div><div id="announcement-history" class="history-list"><div class="history-empty">尚无批量通知记录。</div></div></div>
       </section>
 
       <footer class="footer-note"><span>本机服务 · 127.0.0.1</span><span>授权码仅在当前运行期间保存在内存中</span></footer>
@@ -112,7 +130,43 @@
     <form method="dialog" class="modal-close-row"><button class="icon-button" aria-label="关闭">×</button></form>
     <p class="eyebrow">批量提醒</p><h2>未交提醒</h2><p class="subtle">仅列出未提交且邮箱已核实的成员，默认全选。取消不需要提醒的人后，点击一次发送即可。</p>
     <div id="reminder-list" class="reminder-list"></div>
-    <div class="modal-actions"><span id="reminder-selection-count" class="subtle"></span><button class="primary-button compact-button" id="send-reminders-button" type="button">一键发送催促</button></div>
+    <div class="modal-actions"><label class="select-all reminder-select-all"><input type="checkbox" id="reminder-select-all" checked>全选未交</label><span id="reminder-selection-count" class="subtle"></span><button class="primary-button compact-button" id="send-reminders-button" type="button">一键发送催促</button></div>
+  </dialog>
+
+  <dialog id="roster-import-dialog" class="modal wide-modal import-modal">
+    <form method="dialog" class="modal-close-row"><button class="icon-button" aria-label="关闭">×</button></form>
+    <p class="eyebrow">名单导入预览</p><h2 id="roster-import-title">核对成员记录</h2>
+    <div class="import-settings"><label><span>默认分类</span><input id="roster-import-default-group" maxlength="100" placeholder="文件未提供分类时使用"></label><span id="roster-import-summary" class="subtle"></span></div>
+    <div class="table-wrap import-table-wrap"><table><thead><tr><th>导入</th><th>姓名</th><th>学号</th><th>QQ 号</th><th>分类</th><th>检查</th></tr></thead><tbody id="roster-import-table"></tbody></table></div>
+    <p class="import-privacy">原始文件只在本机内存中解析，不会保存上传副本。已登记成员的邮箱信息会保留。</p>
+    <form id="roster-import-form" class="modal-actions"><button type="button" class="quiet-button" id="roster-import-cancel">取消</button><button class="primary-button compact-button" id="roster-import-submit" type="submit">确认导入</button></form>
+  </dialog>
+
+  <dialog id="announcement-dialog" class="modal wide-modal announcement-modal">
+    <form method="dialog" class="modal-close-row"><button class="icon-button" aria-label="关闭">×</button></form>
+    <p class="eyebrow">QQ 邮箱群发</p><h2>批量通知成员</h2>
+    <p class="subtle">每位成员会收到单独邮件。只向邮箱已登记并核实的成员发送；发送内容和结果保存在本机。</p>
+    <form id="announcement-form" class="announcement-form">
+      <div class="announcement-fields">
+        <label><span>通知主题</span><input id="announcement-subject" maxlength="200" required placeholder="例如：本周课程安排通知"></label>
+        <label><span>收件人分类</span><select id="announcement-group"><option value="">全部分类</option></select></label>
+      </div>
+      <label class="announcement-body-label"><span>通知正文</span><textarea id="announcement-body" maxlength="10000" required rows="5" placeholder="输入要发送给所选成员的统一内容"></textarea></label>
+      <div class="announcement-recipient-heading"><strong>收件成员</strong><button class="text-action" id="announcement-select-visible" type="button">全选当前成员</button></div>
+      <div class="announcement-recipient-toolbar"><span id="announcement-selection-count" class="subtle"></span><input id="announcement-search" class="search-input" placeholder="搜索姓名、QQ号或学号"></div>
+      <div id="announcement-recipients" class="announcement-recipients"></div>
+      <div class="announcement-preview"><strong id="announcement-preview-subject">通知主题预览</strong><p id="announcement-preview-body">填写正文后可在此核对。</p><small id="announcement-preview-count"></small></div>
+      <div class="announcement-result" id="announcement-result" hidden></div>
+      <div class="modal-actions"><button type="button" class="quiet-button" id="announcement-cancel">关闭</button><button class="primary-button compact-button" id="announcement-send" type="submit" disabled>发送通知</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="announcement-history-dialog" class="modal wide-modal announcement-history-dialog">
+    <form method="dialog" class="modal-close-row"><button class="icon-button" aria-label="关闭">×</button></form>
+    <p class="eyebrow">本机发送记录</p><h2 id="announcement-history-title">通知详情</h2>
+    <p id="announcement-history-meta" class="subtle"></p>
+    <div id="announcement-history-body" class="announcement-preview"></div>
+    <div class="table-wrap announcement-history-table"><table><thead><tr><th>成员</th><th>邮箱</th><th>状态</th><th>说明</th></tr></thead><tbody id="announcement-history-recipients"></tbody></table></div>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

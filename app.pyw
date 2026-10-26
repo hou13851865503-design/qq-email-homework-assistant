@@ -2,6 +2,7 @@ import csv
 from contextlib import contextmanager
 import hashlib
 import imaplib
+import io
 import json
 import mimetypes
 import os
@@ -14,6 +15,8 @@ import threading
 import time
 import urllib.request
 import webbrowser
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
 from email import message_from_bytes
 from email.header import decode_header, make_header
@@ -22,7 +25,7 @@ from email.policy import default
 from email.utils import parseaddr, parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -35,6 +38,183 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 SESSION = {"account": None, "auth_code": None}
 SESSION_LOCK = threading.Lock()
+MAX_ROSTER_UPLOAD = 8 * 1024 * 1024
+MAX_ROSTER_ROWS = 1000
+MAX_ANNOUNCEMENT_RECIPIENTS = 200
+
+ROSTER_HEADERS = {
+    "name": {"姓名", "学生姓名", "name", "studentname"},
+    "student_id": {"学号", "学生学号", "学籍号", "studentid", "studentno", "studentnumber"},
+    "qq_number": {"qq", "qq号", "qq号码", "qq帐号", "qq账号", "qqnumber", "qqid"},
+    "group_name": {"班级", "小组", "分类", "group", "groupname", "class", "classname"},
+    "email": {"邮箱", "邮件", "email", "emailaddress"},
+}
+
+
+def normalize_roster_header(value):
+    return re.sub(r"[\s_\-（）()：:]+", "", str(value or "").strip().lower())
+
+
+def split_roster_line(line):
+    line = line.strip().strip("|")
+    if not line:
+        return []
+    if "|" in line:
+        return [cell.strip() for cell in line.split("|")]
+    if "\t" in line:
+        return [cell.strip() for cell in line.split("\t")]
+    cells = re.split(r"\s{2,}", line)
+    if len(cells) == 1:
+        cells = re.split(r"\s+", line)
+    return [cell.strip() for cell in cells if cell.strip()]
+
+
+def roster_header_map(cells):
+    result = {}
+    for index, cell in enumerate(cells):
+        normalized = normalize_roster_header(cell)
+        for field, aliases in ROSTER_HEADERS.items():
+            if normalized in aliases:
+                result[field] = index
+                break
+    return result
+
+
+def parse_roster_rows(table_rows):
+    header_index = None
+    columns = {}
+    for index, cells in enumerate(table_rows):
+        found = roster_header_map(cells)
+        if all(field in found for field in ("name", "student_id", "qq_number")):
+            header_index = index
+            columns = found
+            break
+    if header_index is None:
+        raise ValueError("未找到同时包含姓名、学号和 QQ 号的表头，请确认表格列名后重试")
+
+    parsed = []
+    header_start = min(columns.values())
+    header_end = max(columns.values()) + 1
+    header_width = header_end - header_start
+    header_cells = table_rows[header_index]
+    inline_values = header_cells[header_end:]
+    candidate_rows = []
+    if inline_values and len(inline_values) % header_width == 0:
+        candidate_rows.extend(
+            (header_index + 2 + start // header_width, [""] * header_start + inline_values[start:start + header_width])
+            for start in range(0, len(inline_values), header_width)
+        )
+    candidate_rows.extend(enumerate(table_rows[header_index + 1:], start=header_index + 2))
+
+    for offset, cells in candidate_rows:
+        if not any(str(cell).strip() for cell in cells):
+            continue
+        repeated_header = roster_header_map(cells)
+        if all(field in repeated_header for field in ("name", "student_id", "qq_number")):
+            continue
+        row = {field: (cells[index].strip() if index < len(cells) else "") for field, index in columns.items()}
+        if not any(row.values()):
+            continue
+        qq = re.sub(r"\s+", "", row.get("qq_number", ""))
+        student_id = re.sub(r"\s+", "", row.get("student_id", ""))
+        name = re.sub(r"\s+", " ", row.get("name", "")).strip()
+        error = ""
+        if not name or not student_id or not qq:
+            error = "姓名、学号和 QQ 号均不能为空"
+        elif not re.fullmatch(r"\d{5,12}", qq):
+            error = "QQ 号应为 5 至 12 位数字"
+        parsed.append({
+            "row_number": offset,
+            "name": name,
+            "student_id": student_id,
+            "qq_number": qq,
+            "group_name": row.get("group_name", "").strip(),
+            "email": row.get("email", "").strip(),
+            "error": error,
+        })
+        if len(parsed) > MAX_ROSTER_ROWS:
+            raise ValueError(f"名单超过 {MAX_ROSTER_ROWS} 行，请拆分文件后导入")
+
+    if not parsed:
+        raise ValueError("表格中没有可导入的成员记录")
+    return parsed
+
+
+def parse_docx_roster(content):
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            info = archive.getinfo("word/document.xml")
+            if info.file_size > 32 * 1024 * 1024:
+                raise ValueError("Word 文档内容过大")
+            root = ET.fromstring(archive.read("word/document.xml"))
+    except (zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
+        raise ValueError("无法读取此 Word 文件，请上传有效的 .docx 文档") from exc
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    tables = []
+    for table in root.findall(".//w:tbl", ns):
+        rows = []
+        for table_row in table.findall("./w:tr", ns):
+            cells = []
+            for cell in table_row.findall("./w:tc", ns):
+                text = " ".join(node.text or "" for node in cell.findall(".//w:t", ns)).strip()
+                cells.append(text)
+            rows.append(cells)
+        tables.append(rows)
+    for table in tables:
+        try:
+            return parse_roster_rows(table)
+        except ValueError:
+            continue
+
+    paragraphs = ["".join(node.text or "" for node in paragraph.findall(".//w:t", ns)).strip()
+                  for paragraph in root.findall(".//w:p", ns)]
+    rows = [split_roster_line(line) for line in paragraphs if line.strip()]
+    return parse_roster_rows(rows)
+
+
+def parse_pdf_roster(content):
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise ValueError("PDF 识别依赖尚未安装，请在项目目录运行：python -m pip install -r requirements.txt") from exc
+    try:
+        reader = PdfReader(io.BytesIO(content), strict=False)
+        if reader.is_encrypted:
+            raise ValueError("PDF 已加密，请先解除密码保护")
+        if len(reader.pages) > 100:
+            raise ValueError("PDF 超过 100 页，请拆分文件后导入")
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("无法读取此 PDF，请确认文件未损坏或加密") from exc
+    rows = [split_roster_line(line) for line in text.splitlines() if line.strip()]
+    try:
+        return parse_roster_rows(rows)
+    except ValueError as exc:
+        if not text.strip():
+            raise ValueError("PDF 中没有可提取的文字；扫描图片版 PDF 暂不支持 OCR") from exc
+        raise
+
+
+def parse_roster_upload(filename, content):
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".docx", ".pdf"):
+        raise ValueError("仅支持 .docx Word 文档和 .pdf 文件；旧版 .doc 请另存为 .docx")
+    if not content:
+        raise ValueError("文件内容为空")
+    rows = parse_docx_roster(content) if suffix == ".docx" else parse_pdf_roster(content)
+    seen_qq = set()
+    seen_student_ids = set()
+    for row in rows:
+        if row["qq_number"] in seen_qq:
+            row["error"] = "文件中存在重复 QQ 号"
+        elif row["student_id"] in seen_student_ids:
+            row["error"] = "文件中存在重复学号"
+        seen_qq.add(row["qq_number"])
+        seen_student_ids.add(row["student_id"])
+    return {"filename": Path(filename).name, "rows": rows}
 
 
 @contextmanager
@@ -112,6 +292,25 @@ def initialize():
                 sent_at TEXT NOT NULL,
                 UNIQUE(task_id, qq_number)
             );
+            CREATE TABLE IF NOT EXISTS announcements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                group_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS announcement_recipients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                announcement_id INTEGER NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+                qq_number TEXT NOT NULL,
+                name TEXT NOT NULL,
+                group_name TEXT NOT NULL DEFAULT '',
+                recipient TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT NOT NULL DEFAULT '',
+                sent_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(announcement_id, qq_number)
+            );
         """)
         roster_columns = {row[1] for row in conn.execute("PRAGMA table_info(roster)")}
         if "student_id" not in roster_columns:
@@ -121,6 +320,10 @@ def initialize():
             conn.execute("ALTER TABLE tasks ADD COLUMN assignment_label TEXT NOT NULL DEFAULT ''")
         if "match_by_student_id" not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN match_by_student_id INTEGER NOT NULL DEFAULT 1")
+        if "auto_remind" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN auto_remind INTEGER NOT NULL DEFAULT 0")
+        if "auto_reminded_at" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN auto_reminded_at TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_roster_student_id ON roster(student_id) WHERE student_id<>''")
 
 
@@ -402,6 +605,34 @@ def smtp_send(account, auth_code, recipient, subject, body):
         client.send_message(message)
 
 
+def smtp_send_announcement(account, auth_code, recipients, subject, body):
+    results = []
+    try:
+        with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30) as client:
+            client.login(account, auth_code)
+            for member in recipients:
+                message = EmailMessage()
+                message["From"] = account
+                message["To"] = member["recipient"]
+                message["Subject"] = subject
+                message.set_content(body)
+                try:
+                    refused = client.send_message(message)
+                    refusal = next((reason for address, reason in refused.items() if address.lower() == member["recipient"].lower()), None)
+                    if refusal:
+                        results.append({"qq_number": member["qq_number"], "status": "failed", "error": str(refusal)[:500]})
+                    else:
+                        results.append({"qq_number": member["qq_number"], "status": "sent", "error": ""})
+                except Exception as exc:
+                    results.append({"qq_number": member["qq_number"], "status": "failed", "error": str(exc)[:500] or "发送失败"})
+    except Exception as exc:
+        error = str(exc)[:500] or "QQ 邮箱连接失败"
+        completed = {result["qq_number"] for result in results}
+        results.extend({"qq_number": member["qq_number"], "status": "failed", "error": error}
+                       for member in recipients if member["qq_number"] not in completed)
+    return results
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ClassworkAssistant/1.0"
 
@@ -412,10 +643,20 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(payload)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def read_json(self):
         size = int(self.headers.get("Content-Length", "0"))
@@ -423,10 +664,24 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("请求内容过大")
         return json.loads(self.rfile.read(size).decode("utf-8")) if size else {}
 
+    def read_roster_upload(self):
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("上传文件大小无效") from exc
+        if size <= 0:
+            raise ValueError("文件内容为空")
+        if size > MAX_ROSTER_UPLOAD:
+            raise ValueError("文件不能超过 8 MB")
+        content = self.rfile.read(size)
+        if len(content) != size:
+            raise ValueError("文件上传不完整，请重试")
+        return content
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
-            return self.send_json({"ok": True, "name": "QQ作业助手"})
+            return self.send_json({"ok": True, "name": "QQ作业助手", "app_dir": str(APP_DIR)})
         if parsed.path == "/api/state":
             with db() as conn:
                 roster = [dict(row) for row in conn.execute("SELECT * FROM roster ORDER BY group_name, qq_number")]
@@ -437,9 +692,44 @@ class Handler(BaseHTTPRequestHandler):
                     item["counts"] = summary["counts"]
                     tasks.append(item)
                 groups = [r[0] for r in conn.execute("SELECT DISTINCT group_name FROM roster WHERE active=1 AND group_name<>'' ORDER BY group_name")]
+                announcements = [dict(row) for row in conn.execute("""
+                    SELECT a.id,a.subject,a.group_name,a.created_at,COUNT(r.id) AS recipient_count,
+                        SUM(CASE WHEN r.status='sent' THEN 1 ELSE 0 END) AS sent_count,
+                        SUM(CASE WHEN r.status='failed' THEN 1 ELSE 0 END) AS failed_count,
+                        SUM(CASE WHEN r.status='pending' THEN 1 ELSE 0 END) AS pending_count
+                    FROM announcements a LEFT JOIN announcement_recipients r ON r.announcement_id=a.id
+                    GROUP BY a.id ORDER BY a.id DESC LIMIT 10
+                """)]
             with SESSION_LOCK:
                 account = SESSION["account"]
-            return self.send_json({"roster": roster, "tasks": tasks, "groups": groups, "connected": bool(account), "account": account or ""})
+            return self.send_json({"roster": roster, "tasks": tasks, "groups": groups, "announcements": announcements, "connected": bool(account), "account": account or ""})
+        if parsed.path == "/api/status":
+            with db() as conn:
+                task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+                roster_count = conn.execute("SELECT COUNT(*) FROM roster WHERE active=1").fetchone()[0]
+            with SESSION_LOCK:
+                account = SESSION["account"]
+            return self.send_json({
+                "ok": True,
+                "name": "QQ作业助手",
+                "running": True,
+                "connected": bool(account),
+                "account": account or "",
+                "task_count": task_count,
+                "roster_count": roster_count,
+                "server_time": datetime.now().isoformat(timespec="seconds"),
+            })
+        match = re.fullmatch(r"/api/announcements/(\d+)", parsed.path)
+        if match:
+            with db() as conn:
+                announcement = conn.execute("SELECT * FROM announcements WHERE id=?", (int(match.group(1)),)).fetchone()
+                if not announcement:
+                    return self.send_json({"error": "未找到通知记录"}, 404)
+                recipients = [dict(row) for row in conn.execute(
+                    "SELECT qq_number,name,group_name,recipient,status,error,sent_at FROM announcement_recipients WHERE announcement_id=? ORDER BY id",
+                    (int(match.group(1)),),
+                )]
+            return self.send_json({"announcement": dict(announcement), "recipients": recipients})
         match = re.fullmatch(r"/api/tasks/(\d+)", parsed.path)
         if match:
             with db() as conn:
@@ -470,6 +760,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type + ("; charset=utf-8" if content_type.startswith("text/") or content_type == "application/javascript" else ""))
             self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return self.wfile.write(content)
         return self.send_json({"error": "未找到接口"}, 404)
@@ -480,8 +771,12 @@ class Handler(BaseHTTPRequestHandler):
         if origin and urlparse(origin).netloc != host:
             return self.send_json({"error": "来源校验失败"}, 403)
         try:
-            data = self.read_json()
             path = urlparse(self.path).path
+            if path == "/api/roster/import-preview":
+                filename = Path(unquote(self.headers.get("X-Upload-Filename", ""))).name
+                content = self.read_roster_upload()
+                return self.send_json(parse_roster_upload(filename, content))
+            data = self.read_json()
             if path == "/api/connect":
                 account = str(data.get("account", "")).strip().lower()
                 auth_code = str(data.get("auth_code", "")).strip().replace(" ", "")
@@ -502,6 +797,81 @@ class Handler(BaseHTTPRequestHandler):
                 with SESSION_LOCK:
                     SESSION.update(account=None, auth_code=None)
                 return self.send_json({"ok": True})
+            if path == "/api/announcements":
+                with SESSION_LOCK:
+                    account, auth_code = SESSION["account"], SESSION["auth_code"]
+                if not account or not auth_code:
+                    raise ValueError("请先连接 QQ 邮箱")
+                subject = str(data.get("subject", "")).strip()
+                body = str(data.get("body", "")).strip()
+                group_filter = str(data.get("group_filter", "")).strip()
+                raw_qq_numbers = data.get("qq_numbers")
+                if not isinstance(raw_qq_numbers, list):
+                    raise ValueError("收件人列表格式无效")
+                qq_numbers = [str(value).strip() for value in raw_qq_numbers]
+                if not subject or not body:
+                    raise ValueError("通知主题和正文不能为空")
+                if len(subject) > 200 or "\r" in subject or "\n" in subject:
+                    raise ValueError("主题不能超过 200 字，且不能包含换行")
+                if len(body) > 10000:
+                    raise ValueError("通知正文不能超过 10000 字")
+                if not qq_numbers:
+                    raise ValueError("请至少选择一位收件人")
+                if len(qq_numbers) > MAX_ANNOUNCEMENT_RECIPIENTS:
+                    raise ValueError(f"一次最多向 {MAX_ANNOUNCEMENT_RECIPIENTS} 位成员发送通知")
+                if len(set(qq_numbers)) != len(qq_numbers):
+                    raise ValueError("收件人列表包含重复成员，请刷新后重试")
+                with db() as conn:
+                    placeholders = ",".join("?" for _ in qq_numbers)
+                    rows = conn.execute(f"""
+                        SELECT qq_number,name,student_id,group_name,email,email_verified,active
+                        FROM roster WHERE qq_number IN ({placeholders})
+                    """, qq_numbers).fetchall()
+                    by_qq = {row["qq_number"]: row for row in rows}
+                    if len(by_qq) != len(qq_numbers):
+                        raise ValueError("部分成员已不在花名册中，请刷新名单")
+                    recipients = []
+                    for qq in qq_numbers:
+                        member = by_qq[qq]
+                        if not member["active"] or not member["email_verified"] or not member["email"]:
+                            raise ValueError(f"{member['name']}（QQ {qq}）没有已核实邮箱，不能发送")
+                        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", member["email"]):
+                            raise ValueError(f"{member['name']}（QQ {qq}）的邮箱地址格式无效")
+                        if group_filter == "__none__" and member["group_name"]:
+                            raise ValueError("收件人分类已发生变化，请刷新列表后重试")
+                        if group_filter and group_filter != "__none__" and member["group_name"] != group_filter:
+                            raise ValueError("收件人分类已发生变化，请刷新列表后重试")
+                        recipients.append({
+                            "qq_number": qq, "name": member["name"],
+                            "group_name": member["group_name"], "recipient": member["email"],
+                        })
+                    created_at = datetime.now().astimezone().isoformat(timespec="minutes")
+                    cursor = conn.execute(
+                        "INSERT INTO announcements(subject,body,group_name,created_at) VALUES(?,?,?,?)",
+                        (subject, body, "全部分类" if not group_filter else ("未分类" if group_filter == "__none__" else group_filter), created_at),
+                    )
+                    announcement_id = cursor.lastrowid
+                    conn.executemany("""
+                        INSERT INTO announcement_recipients(announcement_id,qq_number,name,group_name,recipient,status)
+                        VALUES(?,?,?,?,?,'pending')
+                    """, [
+                        (announcement_id, member["qq_number"], member["name"], member["group_name"], member["recipient"])
+                        for member in recipients
+                    ])
+
+                results = smtp_send_announcement(account, auth_code, recipients, subject, body)
+                sent_at = datetime.now().astimezone().isoformat(timespec="minutes")
+                with db() as conn:
+                    conn.executemany("""
+                        UPDATE announcement_recipients SET status=?,error=?,sent_at=?
+                        WHERE announcement_id=? AND qq_number=?
+                    """, [
+                        (result["status"], result["error"], sent_at if result["status"] == "sent" else "", announcement_id, result["qq_number"])
+                        for result in results
+                    ])
+                sent = [result["qq_number"] for result in results if result["status"] == "sent"]
+                errors = [result for result in results if result["status"] == "failed"]
+                return self.send_json({"ok": not errors, "announcement_id": announcement_id, "sent": sent, "errors": errors})
             if path == "/api/roster":
                 action = data.get("action", "save")
                 with db() as conn:
@@ -531,6 +901,48 @@ class Handler(BaseHTTPRequestHandler):
                                 (qq, name, student_id, group_name, email, int(verified)))
                             count += 1
                         return self.send_json({"ok": True, "count": count})
+                    if action == "import-parsed":
+                        rows = data.get("rows")
+                        if not isinstance(rows, list) or not rows or len(rows) > MAX_ROSTER_ROWS:
+                            raise ValueError("请至少选择一条有效记录，且一次最多导入 1000 条")
+                        normalized_rows = []
+                        seen_qq = set()
+                        seen_student_ids = set()
+                        for row in rows:
+                            if not isinstance(row, dict):
+                                raise ValueError("导入数据格式无效，请重新预览文件")
+                            qq = str(row.get("qq_number", "")).strip()
+                            name = str(row.get("name", "")).strip()
+                            student_id = str(row.get("student_id", "")).strip()
+                            group_name = str(row.get("group_name", "")).strip()
+                            if not name or not student_id or not re.fullmatch(r"\d{5,12}", qq):
+                                raise ValueError("每条记录都需要有效的姓名、学号和 5 至 12 位 QQ 号")
+                            if len(name) > 80 or len(student_id) > 80 or len(group_name) > 100:
+                                raise ValueError("姓名、学号或分类名称过长")
+                            if qq in seen_qq:
+                                raise ValueError(f"文件中 QQ 号 {qq} 重复，请检查预览记录")
+                            if student_id in seen_student_ids:
+                                raise ValueError(f"文件中学号 {student_id} 重复，请检查预览记录")
+                            seen_qq.add(qq)
+                            seen_student_ids.add(student_id)
+                            normalized_rows.append((qq, name, student_id, group_name))
+
+                        for qq, name, student_id, group_name in normalized_rows:
+                            owner = conn.execute("SELECT qq_number,name FROM roster WHERE student_id=? AND qq_number<>?", (student_id, qq)).fetchone()
+                            if owner:
+                                raise ValueError(f"学号 {student_id} 已登记给 {owner['name']}（QQ {owner['qq_number']}）")
+
+                        created = 0
+                        updated = 0
+                        for qq, name, student_id, group_name in normalized_rows:
+                            existing = conn.execute("SELECT qq_number FROM roster WHERE qq_number=?", (qq,)).fetchone()
+                            if existing:
+                                conn.execute("UPDATE roster SET name=?,student_id=?,group_name=? WHERE qq_number=?", (name, student_id, group_name, qq))
+                                updated += 1
+                            else:
+                                conn.execute("INSERT INTO roster(qq_number,name,student_id,group_name) VALUES(?,?,?,?)", (qq, name, student_id, group_name))
+                                created += 1
+                        return self.send_json({"ok": True, "count": len(normalized_rows), "created": created, "updated": updated})
                     qq = str(data.get("qq_number", "")).strip()
                     name = str(data.get("name", "")).strip()
                     student_id = str(data.get("student_id", "")).strip()
@@ -655,8 +1067,8 @@ class Handler(BaseHTTPRequestHandler):
                             "match_method": match_method, "attachments": matches,
                         })
                     with db() as conn:
-                        cursor = conn.execute("""INSERT INTO tasks(name,assignment_label,match_by_student_id,start_date,end_date,due_at,keywords,keyword_mode,keyword_fields,group_name,created_at)
-                            VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (name,assignment_label,int(match_by_student_id),start.isoformat(),end.isoformat(),due_at,json.dumps(keywords,ensure_ascii=False),mode,json.dumps(fields),group_name,datetime.now().astimezone().isoformat(timespec="minutes")))
+                        cursor = conn.execute("""INSERT INTO tasks(name,assignment_label,match_by_student_id,start_date,end_date,due_at,keywords,keyword_mode,keyword_fields,group_name,auto_remind,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (name,assignment_label,int(match_by_student_id),start.isoformat(),end.isoformat(),due_at,json.dumps(keywords,ensure_ascii=False),mode,json.dumps(fields),group_name,int(bool(data.get("auto_remind"))),datetime.now().astimezone().isoformat(timespec="minutes")))
                         task_id = cursor.lastrowid
                         for item in candidates:
                             cursor = conn.execute("""INSERT INTO messages(task_id,uid,uidvalidity,message_id,from_addr,from_name,subject,received_at,matched_qq,match_method)
@@ -727,6 +1139,15 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True, "folder": str(export_dir), "folder_name": export_dir.name,
                     "files": len(downloaded),
                 })
+            match = re.fullmatch(r"/api/tasks/(\d+)/auto-remind", path)
+            if match:
+                task_id = int(match.group(1))
+                enabled = 1 if data.get("enabled") else 0
+                with db() as conn:
+                    if not conn.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone():
+                        raise ValueError("未找到该任务")
+                    conn.execute("UPDATE tasks SET auto_remind=? WHERE id=?", (enabled, task_id))
+                    return self.send_json(task_summary(conn, task_id))
             match = re.fullmatch(r"/api/tasks/(\d+)/remind", path)
             if match:
                 task_id = int(match.group(1))
@@ -781,8 +1202,62 @@ class LocalServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+def auto_remind_loop():
+    """后台调度：对开启「截止后自动提醒」且已过截止时间的任务，自动发送一次未交提醒。
+
+    仅向「未提交 + 邮箱已核实 + 未提醒过」的成员发送；每个任务只发一次（auto_reminded_at 标记）。
+    全程包裹异常，绝不因单次失败影响服务或其它任务。
+    """
+    while True:
+        time.sleep(60)
+        try:
+            with SESSION_LOCK:
+                account = SESSION.get("account")
+                auth_code = SESSION.get("auth_code")
+            if not account or not auth_code:
+                continue
+            with db() as conn:
+                rows = conn.execute(
+                    "SELECT id,due_at FROM tasks WHERE auto_remind=1 AND auto_reminded_at IS NULL AND due_at<>''"
+                ).fetchall()
+            now = datetime.now().astimezone()
+            for task_id, due_at in rows:
+                try:
+                    due = datetime.fromisoformat(due_at)
+                except Exception:
+                    continue
+                if due > now:
+                    continue
+                try:
+                    with db() as conn:
+                        summary = task_summary(conn, task_id)
+                    drafts = Handler._drafts(summary)
+                    stamp = datetime.now().astimezone().isoformat(timespec="minutes")
+                    if not drafts:
+                        with db() as conn:
+                            conn.execute("UPDATE tasks SET auto_reminded_at=? WHERE id=?", (stamp, task_id))
+                        continue
+                    for draft in drafts:
+                        try:
+                            smtp_send(account, auth_code, draft["recipient"], draft["subject"], draft["body"])
+                        except Exception:
+                            continue
+                        with db() as conn:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO reminders(task_id,qq_number,recipient,sent_at) VALUES(?,?,?,?)",
+                                (task_id, draft["qq_number"], draft["recipient"], datetime.now().astimezone().isoformat(timespec="minutes")),
+                            )
+                    with db() as conn:
+                        conn.execute("UPDATE tasks SET auto_reminded_at=? WHERE id=?", (stamp, task_id))
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+
 def find_port():
-    for candidate in range(8765, 8796):
+    candidates = [8765] + list(range(8766, 8796))
+    for candidate in candidates:
         probe = socket.socket()
         try:
             probe.bind(("127.0.0.1", candidate))
@@ -793,7 +1268,7 @@ def find_port():
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{candidate}/api/health", timeout=0.5) as response:
                     state = json.loads(response.read().decode("utf-8"))
-                    if state.get("name") == "QQ作业助手":
+                    if state.get("name") == "QQ作业助手" and state.get("app_dir") == str(APP_DIR):
                         webbrowser.open(f"http://127.0.0.1:{candidate}")
                         return None
             except Exception:
@@ -811,6 +1286,7 @@ def main():
     if port is None:
         return
     server = LocalServer(("127.0.0.1", port), Handler)
+    threading.Thread(target=auto_remind_loop, daemon=True).start()
     threading.Timer(0.7, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
     server.serve_forever()
 
