@@ -150,11 +150,20 @@ function renderHistory() {
   container.innerHTML = state.tasks.length ? state.tasks.map(task => `
     <button class="history-item" data-load-task="${task.id}">
       <span class="history-main"><strong>${esc(task.name)}</strong><small>${esc(task.start_date)} 至 ${esc(task.end_date)} · ${esc(task.assignment_label || '未设固定标识')} · ${esc(task.group_name || '全部成员')}</small></span>
-      <span class="history-count">${task.counts.submitted}/${task.counts.expected} 已交 · ${task.counts.files} 份 PDF</span>
+      <span class="history-count">${task.counts.submitted}/${task.counts.expected} 已交 · ${task.counts.files} 个文件</span>
     </button>`).join('') : '<div class="history-empty">完成第一次扫描后，任务记录会显示在这里。</div>';
 }
 
 function setCount(id, value) { $(id).textContent = String(value); }
+
+// 附件类型角标：按文件扩展名显示（PDF / DOCX / ZIP…），无扩展名显示"文件"
+function fileTag(name = '') {
+  const text = String(name);
+  const dot = text.lastIndexOf('.');
+  if (dot <= 0 || dot === text.length - 1) return '文件';
+  const ext = text.slice(dot + 1).toLowerCase();
+  return /^[a-z0-9]{1,5}$/.test(ext) ? ext.toUpperCase() : '文件';
+}
 
 function renderTask(data) {
   state.current = data;
@@ -183,10 +192,10 @@ function renderTask(data) {
   $('#files-table').innerHTML = data.attachments.length ? data.attachments.map(file => `
     <tr>
       <td><input type="checkbox" class="file-choice" value="${file.id}" aria-label="选择 ${esc(file.filename)}"></td>
-      <td><div class="file-name"><span class="pdf-mark">PDF</span><span title="${esc(file.filename)}">${esc(file.filename)}</span></div></td>
+      <td><div class="file-name"><span class="pdf-mark">${esc(fileTag(file.filename))}</span><span title="${esc(file.filename)}">${esc(file.filename)}</span></div></td>
       <td title="${esc(file.from_addr)}">${esc(file.from_name || file.from_addr || '未知发件人')}</td><td>${esc(formatDate(file.received_at, true))}</td>
       <td class="truncate" title="${esc(file.subject)}">${esc(file.subject || '(无主题)')}</td>
-    </tr>`).join('') : '<tr><td colspan="5" class="table-empty">没有符合条件的 PDF 附件</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="5" class="table-empty">没有符合条件的附件</td></tr>';
   $('#unmatched-table').innerHTML = data.unmatched.length ? data.unmatched.map(message => `
     <tr><td>${esc(message.from_addr || '未知')}</td><td>${esc(message.from_name || '—')}</td><td>${esc(formatDate(message.received_at, true))}</td><td class="truncate" title="${esc(message.subject)}">${esc(message.subject || '(无主题)')}</td><td>${esc(message.match_method || '身份待确认')}</td></tr>`).join('') : '<tr><td colspan="5" class="table-empty">没有未匹配的邮件</td></tr>';
   $('#select-all-files').checked = false;
@@ -392,7 +401,7 @@ $('#scan-form').addEventListener('submit', async event => {
     renderTask(data);
     await refresh();
     showView('overview');
-    toast(`统计完成：找到 ${data.counts.files} 份 PDF，${data.counts.missing} 人未提交`);
+    toast(`统计完成：找到 ${data.counts.files} 个附件，${data.counts.missing} 人未提交`);
   } catch (error) { toast(error.message, true); }
   finally { setBusy(form, false); }
 });
@@ -733,13 +742,13 @@ $('#desktop-export-button').addEventListener('click', async () => {
   if (!state.current || !state.current.counts.files) return;
   const button = $('#desktop-export-button');
   button.disabled = true;
-  button.textContent = '正在导出 PDF…';
+  button.textContent = '正在导出文件…';
   try {
     const result = await api(`/api/tasks/${state.current.task.id}/export-desktop`, { method: 'POST', body: {} });
-    toast(`已导出 ${result.files} 份 PDF 和来源清单到桌面文件夹“${result.folder_name}”`);
+    toast(`已导出 ${result.files} 个文件和来源清单到桌面文件夹“${result.folder_name}”`);
   } catch (error) { toast(error.message, true); }
   finally {
-    button.innerHTML = '↥ 导出 PDF 到桌面';
+    button.innerHTML = '↥ 导出文件到桌面';
     button.disabled = !state.current?.counts.files;
   }
 });

@@ -429,30 +429,38 @@ def local_date(parsed):
         return datetime.now().astimezone()
 
 
-def attachment_parts(message):
-    found = []
+def iter_attachment_parts(message):
+    """遍历邮件里的附件（任意类型：PDF / Word / 压缩包等）。
+
+    ordinal 只对"合格分部"递增，扫描与下载两处必须用同一套规则，
+    否则按 ordinal 定位附件会错位。
+    """
     ordinal = 0
     for part in message.walk():
         if part.is_multipart():
             continue
         filename = decoded(part.get_filename())
-        if not filename and part.get_content_disposition() != "attachment":
+        disposition = (part.get_content_disposition() or "").lower()
+        if not filename and disposition != "attachment":
             continue
         if not filename:
-            filename = "附件.pdf" if part.get_content_type() == "application/pdf" else "附件"
-        payload = part.get_payload(decode=True) or b""
-        if filename.lower().endswith(".pdf") or part.get_content_type() == "application/pdf":
-            if not filename.lower().endswith(".pdf"):
-                filename += ".pdf"
-            found.append({
-                "ordinal": ordinal,
-                "filename": filename,
-                "content_type": part.get_content_type(),
-                "size": len(payload),
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            })
+            ext = (mimetypes.guess_extension(part.get_content_type() or "") or "").lower()
+            if ext in (".jpe", ".jpeg"):
+                ext = ".jpg"
+            filename = "附件" + ext
+        yield ordinal, filename.strip(), part.get_content_type(), (part.get_payload(decode=True) or b"")
         ordinal += 1
-    return found
+
+
+def attachment_parts(message):
+    """邮件中的所有附件；不看扩展名，只按文件名参与匹配。"""
+    return [{
+        "ordinal": ordinal,
+        "filename": filename,
+        "content_type": content_type,
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    } for ordinal, filename, content_type, payload in iter_attachment_parts(message)]
 
 
 def message_text(message):
@@ -476,7 +484,7 @@ def message_text(message):
 def clean_filename(name):
     name = Path(name.replace("\\", "/")).name
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
-    return name[:180] or "作业.pdf"
+    return name[:180] or "作业"
 
 
 def clean_label(name):
@@ -571,22 +579,8 @@ def materialize_attachments(task_id, task, rows, account, auth_code):
             message = message_from_bytes(raw, policy=default)
             if str(message.get("Message-ID", "")).strip() != row["source_message_id"]:
                 raise ValueError("邮件来源校验失败，请重新扫描后再下载")
-            parts = []
-            ordinal = 0
-            for part in message.walk():
-                if part.is_multipart():
-                    continue
-                filename = decoded(part.get_filename())
-                if not filename and part.get_content_disposition() != "attachment":
-                    continue
-                if not filename:
-                    filename = "附件.pdf" if part.get_content_type() == "application/pdf" else "附件"
-                payload = part.get_payload(decode=True) or b""
-                if filename.lower().endswith(".pdf") or part.get_content_type() == "application/pdf":
-                    if not filename.lower().endswith(".pdf"):
-                        filename += ".pdf"
-                    parts.append((ordinal, filename, payload))
-                ordinal += 1
+            parts = [(ordinal, filename, payload)
+                     for ordinal, filename, _ctype, payload in iter_attachment_parts(message)]
             selected = next((part for part in parts if part[0] == row["ordinal"]), None)
             if not selected:
                 raise ValueError("所选附件在原邮件中已不存在")
@@ -1198,7 +1192,7 @@ class Handler(BaseHTTPRequestHandler):
                 task_id = int(match.group(1))
                 ids = [int(v) for v in data.get("attachment_ids", [])]
                 if not ids:
-                    raise ValueError("请至少选择一个 PDF")
+                    raise ValueError("请至少选择一个文件")
                 with SESSION_LOCK:
                     account, auth_code = SESSION["account"], SESSION["auth_code"]
                 if not account or not auth_code:
@@ -1226,7 +1220,7 @@ class Handler(BaseHTTPRequestHandler):
                         FROM attachments a JOIN messages m ON m.id=a.message_id
                         WHERE m.task_id=? ORDER BY m.received_at,a.filename""", (task_id,)).fetchall()
                 if not rows:
-                    raise ValueError("本次统计没有可导出的 PDF")
+                    raise ValueError("本次统计没有可导出的文件")
                 downloaded = materialize_attachments(task_id, task, rows, account, auth_code)
                 desktop = desktop_directory()
                 desktop.mkdir(parents=True, exist_ok=True)

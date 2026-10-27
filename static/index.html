@@ -49,7 +49,7 @@
               <label class="student-id-option"><input id="auto-remind" type="checkbox"><span>截止后自动提醒未交成员（仅发一次，需保持邮箱连接）</span></label>
               <span class="auto-remind-state" id="auto-remind-state" aria-live="polite"></span>
               </div>
-              <div class="privacy-callout"><span class="callout-icon">i</span><span>仅读取收件箱中符合日期、关键词的 PDF 附件。扫描结果和下载文件留在本机。</span></div>
+              <div class="privacy-callout"><span class="callout-icon">i</span><span>仅读取收件箱中符合日期、关键词的附件（PDF / Word / 压缩包等，按文件名匹配，不限格式）。扫描结果和下载文件留在本机。</span></div>
               <button class="primary-button" type="submit"><span>⌕</span>开始扫描并统计</button>
             </form>
           </section>
@@ -60,7 +60,7 @@
               <div class="stat"><span>已提交</span><strong id="stat-submitted">—</strong></div>
               <div class="stat"><span>未提交</span><strong id="stat-missing">—</strong></div>
               <div class="stat"><span>迟交</span><strong id="stat-late">—</strong></div>
-              <div class="stat"><span>匹配 PDF</span><strong id="stat-files">—</strong></div>
+              <div class="stat"><span>匹配文件</span><strong id="stat-files">—</strong></div>
             </div>
             <div class="panel submission-vis" id="submission-vis" hidden>
               <div class="panel-heading"><div><span class="section-kicker">提交概览</span><h2>完成度与班级分布</h2></div></div>
@@ -78,12 +78,12 @@
               <div class="vis-classes" id="vis-classes"></div>
             </div>
             <div class="panel result-panel">
-              <div class="panel-heading result-heading"><div><span class="section-kicker" id="result-kicker">尚未运行</span><h2 id="result-title">扫描结果</h2><button type="button" class="auto-remind-badge" id="auto-remind-badge" hidden title="点击关闭/开启截止后自动提醒"></button></div><div class="result-actions" id="result-actions" hidden><button class="quiet-button" id="desktop-export-button" title="全部匹配 PDF 导出至桌面新文件夹">↥ 导出 PDF 到桌面</button><button class="quiet-button" id="export-button" title="导出统计 CSV">导出 CSV</button><button class="quiet-button" id="reminder-button" title="预览未交提醒">提醒未交</button></div></div>
+              <div class="panel-heading result-heading"><div><span class="section-kicker" id="result-kicker">尚未运行</span><h2 id="result-title">扫描结果</h2><button type="button" class="auto-remind-badge" id="auto-remind-badge" hidden title="点击关闭/开启截止后自动提醒"></button></div><div class="result-actions" id="result-actions" hidden><button class="quiet-button" id="desktop-export-button" title="全部匹配附件导出至桌面新文件夹">↥ 导出文件到桌面</button><button class="quiet-button" id="export-button" title="导出统计 CSV">导出 CSV</button><button class="quiet-button" id="reminder-button" title="预览未交提醒">提醒未交</button></div></div>
               <div id="empty-state" class="empty-state"><div class="empty-icon">⌕</div><strong>等待一次按需扫描</strong><p>设置日期和关键词后开始。扫描不会标记邮件为已读。</p></div>
               <div id="result-content" hidden>
                 <div class="result-tabs"><button class="result-tab active" data-result-tab="members">提交状态 <span id="member-tab-count">0</span></button><button class="result-tab" data-result-tab="files">附件来源 <span id="file-tab-count">0</span></button><button class="result-tab" data-result-tab="unmatched">未匹配发件人 <span id="unmatched-tab-count">0</span></button></div>
                 <div class="tab-content active" id="tab-members"><div class="table-wrap"><table><thead><tr><th>提交人</th><th>学号</th><th>QQ 号</th><th>班级 / 小组</th><th>状态</th><th>文件</th></tr></thead><tbody id="members-table"></tbody></table></div></div>
-                <div class="tab-content" id="tab-files"><div class="toolbar-row"><label class="select-all"><input type="checkbox" id="select-all-files">全选匹配 PDF</label><button class="quiet-button" id="download-button" disabled>下载所选文件</button></div><div class="table-wrap"><table><thead><tr><th></th><th>PDF 文件</th><th>发件人</th><th>接收时间</th><th>来源主题</th></tr></thead><tbody id="files-table"></tbody></table></div></div>
+                <div class="tab-content" id="tab-files"><div class="toolbar-row"><label class="select-all"><input type="checkbox" id="select-all-files">全选匹配文件</label><button class="quiet-button" id="download-button" disabled>下载所选文件</button></div><div class="table-wrap"><table><thead><tr><th></th><th>文件名</th><th>发件人</th><th>接收时间</th><th>来源主题</th></tr></thead><tbody id="files-table"></tbody></table></div></div>
                 <div class="tab-content" id="tab-unmatched"><div class="table-wrap"><table><thead><tr><th>发件地址</th><th>发件人</th><th>接收时间</th><th>主题</th><th>识别说明</th></tr></thead><tbody id="unmatched-table"></tbody></table></div><p class="table-footnote">无法唯一对应登记邮箱、QQ 号或学号的邮件不会计入任何人的提交状态。</p></div>
               </div>
             </div>
