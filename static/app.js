@@ -732,7 +732,7 @@ $('#download-button').addEventListener('click', async () => {
   button.textContent = '下载并校验中…';
   try {
     const result = await api(`/api/tasks/${state.current.task.id}/download`, { method: 'POST', body: { attachment_ids: ids } });
-    toast(`已下载并校验 ${result.downloaded.length} 个文件：${result.downloaded[0]?.path || ''}`);
+    toast(`已保存 ${result.files} 个文件到：${result.folder}`);
     renderTask(await api(`/api/tasks/${state.current.task.id}`));
   } catch (error) { toast(error.message, true); }
   finally { updateDownloadState(); }
@@ -745,7 +745,7 @@ $('#desktop-export-button').addEventListener('click', async () => {
   button.textContent = '正在导出文件…';
   try {
     const result = await api(`/api/tasks/${state.current.task.id}/export-desktop`, { method: 'POST', body: {} });
-    toast(`已导出 ${result.files} 个文件和来源清单到桌面文件夹“${result.folder_name}”`);
+    toast(`已保存 ${result.files} 个文件到：${result.folder}`);
   } catch (error) { toast(error.message, true); }
   finally {
     button.innerHTML = '↥ 导出文件到桌面';

@@ -538,6 +538,62 @@ def desktop_directory():
     return Path.home() / "Desktop"
 
 
+def open_folder(path):
+    """在资源管理器里打开文件夹（失败不影响主流程）。"""
+    try:
+        if os.name == "nt":
+            os.startfile(str(path))  # noqa: S606
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception:
+        pass
+
+
+def export_folder_for(task):
+    """在桌面新建一个不重名的导出文件夹；桌面不可写时退回「下载」目录。"""
+    desktop = desktop_directory()
+    try:
+        desktop.mkdir(parents=True, exist_ok=True)
+        probe = desktop / ".write_test"
+        probe.write_bytes(b"")
+        probe.unlink(missing_ok=True)
+    except Exception:
+        desktop = Path.home() / "Downloads"
+        desktop.mkdir(parents=True, exist_ok=True)
+    base = "{0}_至_{1}_{2}_{3}".format(
+        task["start_date"], task["end_date"],
+        clean_label(task["name"]), datetime.now().strftime("%Y%m%d_%H%M%S"))
+    target = desktop / base
+    suffix = 2
+    while target.exists():
+        target = desktop / f"{base}_{suffix}"
+        suffix += 1
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def copy_into_folder(items, folder):
+    """把下载好的文件（连同 .source.json 来源清单）复制到目标文件夹。"""
+    copied = 0
+    for item in items:
+        source = Path(item["path"])
+        if not source.is_file():
+            continue
+        try:
+            shutil.copy2(source, folder / source.name)
+            copied += 1
+        except Exception:
+            continue
+        manifest = source.with_name(source.name + ".source.json")
+        if manifest.is_file():
+            try:
+                shutil.copy2(manifest, folder / manifest.name)
+            except Exception:
+                pass
+    return copied
+
+
 def file_sha256(path):
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -1205,7 +1261,11 @@ class Handler(BaseHTTPRequestHandler):
                 if len(rows) != len(set(ids)):
                     raise ValueError("所选文件中包含无效记录，请刷新页面后重试")
                 downloaded = materialize_attachments(task_id, task, rows, account, auth_code)
-                return self.send_json({"ok": True, "downloaded": downloaded})
+                folder = export_folder_for(task)
+                copied = copy_into_folder(downloaded, folder)
+                open_folder(folder)
+                return self.send_json({"ok": True, "downloaded": downloaded, "folder": str(folder),
+                                       "folder_name": folder.name, "files": copied})
             match = re.fullmatch(r"/api/tasks/(\d+)/export-desktop", path)
             if match:
                 task_id = int(match.group(1))
@@ -1222,25 +1282,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not rows:
                     raise ValueError("本次统计没有可导出的文件")
                 downloaded = materialize_attachments(task_id, task, rows, account, auth_code)
-                desktop = desktop_directory()
-                desktop.mkdir(parents=True, exist_ok=True)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                base_name = f"{task['start_date']}_至_{task['end_date']}_{clean_label(task['name'])}_{timestamp}"
-                export_dir = desktop / base_name
-                suffix = 2
-                while export_dir.exists():
-                    export_dir = desktop / f"{base_name}_{suffix}"
-                    suffix += 1
-                export_dir.mkdir()
-                for item in downloaded:
-                    source = Path(item["path"])
-                    shutil.copy2(source, export_dir / source.name)
-                    manifest = source.with_name(source.name + ".source.json")
-                    if manifest.is_file():
-                        shutil.copy2(manifest, export_dir / manifest.name)
+                folder = export_folder_for(task)
+                copied = copy_into_folder(downloaded, folder)
+                open_folder(folder)
                 return self.send_json({
-                    "ok": True, "folder": str(export_dir), "folder_name": export_dir.name,
-                    "files": len(downloaded),
+                    "ok": True, "folder": str(folder), "folder_name": folder.name,
+                    "files": copied,
                 })
             match = re.fullmatch(r"/api/tasks/(\d+)/auto-remind", path)
             if match:
