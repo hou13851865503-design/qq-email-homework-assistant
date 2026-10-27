@@ -11,6 +11,8 @@ import smtplib
 import socket
 import sqlite3
 import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.request
@@ -162,31 +164,59 @@ def roster_header_map(cells):
     return result
 
 
+def merge_header_rows(rows):
+    """把多行表头按列合并成一行（每列取最下层非空值）。
+
+    两级表头里，上层是"联系方式"这类分组，下层才是"QQ号/邮箱"这种具体列名，
+    所以要优先取下面那行。
+    """
+    if not rows:
+        return []
+    width = max(len(row) for row in rows)
+    merged = []
+    for column in range(width):
+        value = ""
+        for row in reversed(rows):
+            text = row[column] if column < len(row) else ""
+            if text:
+                value = text
+                break
+        merged.append(value)
+    return merged
+
+
 def parse_roster_rows(table_rows):
     header_index = None
     columns = {}
-    for index, cells in enumerate(table_rows):
-        found = roster_header_map(cells)
-        if all(field in found for field in ("name", "student_id", "qq_number")):
-            header_index = index
-            columns = found
+    header_span = 1
+    # 表头可能占 1~3 行（两级表头、合并单元格很常见）
+    for index in range(len(table_rows)):
+        for span in (1, 2, 3):
+            if index + span > len(table_rows):
+                break
+            combined = merge_header_rows(table_rows[index:index + span])
+            found = roster_header_map(combined)
+            if all(field in found for field in ("name", "student_id", "qq_number")):
+                header_index, columns, header_span = index, found, span
+                break
+        if header_index is not None:
             break
     if header_index is None:
         raise ValueError("未找到同时包含姓名、学号和 QQ 号的表头，请确认表格列名后重试")
 
     parsed = []
+    header_cells = merge_header_rows(table_rows[header_index:header_index + header_span])
     header_start = min(columns.values())
     header_end = max(columns.values()) + 1
     header_width = header_end - header_start
-    header_cells = table_rows[header_index]
     inline_values = header_cells[header_end:]
     candidate_rows = []
     if inline_values and len(inline_values) % header_width == 0:
         candidate_rows.extend(
-            (header_index + 2 + start // header_width, [""] * header_start + inline_values[start:start + header_width])
+            (header_index + header_span + 1 + start // header_width, [""] * header_start + inline_values[start:start + header_width])
             for start in range(0, len(inline_values), header_width)
         )
-    candidate_rows.extend(enumerate(table_rows[header_index + 1:], start=header_index + 2))
+    candidate_rows.extend(enumerate(table_rows[header_index + header_span:], start=header_index + header_span + 1))
 
     for offset, cells in candidate_rows:
         if not any(str(cell).strip() for cell in cells):
@@ -233,6 +263,7 @@ def parse_docx_roster(content):
         raise ValueError("无法读取此 Word 文件，请上传有效的 .docx 文档") from exc
 
     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    val_attr = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val"
     tables = []
     for table in root.findall(".//w:tbl", ns):
         rows = []
@@ -240,7 +271,16 @@ def parse_docx_roster(content):
             cells = []
             for cell in table_row.findall("./w:tc", ns):
                 text = " ".join(node.text or "" for node in cell.findall(".//w:t", ns)).strip()
+                span = 1
+                span_node = cell.find("./w:tcPr/w:gridSpan", ns)
+                if span_node is not None:
+                    try:
+                        span = max(1, int(span_node.get(val_attr, "1") or "1"))
+                    except (TypeError, ValueError):
+                        span = 1
                 cells.append(text)
+                # 合并单元格要占多个列位，否则后面所有列都会错位
+                cells.extend([""] * (span - 1))
             rows.append(cells)
         tables.append(rows)
     for table in tables:
@@ -280,12 +320,51 @@ def parse_pdf_roster(content):
         raise
 
 
+def convert_legacy_doc(content):
+    """把老版 .doc 用本机 Word 转成 .docx 字节流。
+
+    .doc 是二进制 OLE 格式，纯 Python 解析不可靠；本机装了 Word 就借它转换。
+    没有 Word 时给明确提示，而不是抛一个看不懂的错。
+    """
+    if os.name != "nt":
+        raise ValueError("旧版 .doc 需要本机安装 Word 才能自动转换，请用 Word 另存为 .docx 后上传")
+    temp_dir = Path(tempfile.mkdtemp(prefix="roster_doc_"))
+    try:
+        source = temp_dir / "input.doc"
+        target = temp_dir / "output.docx"
+        source.write_bytes(content)
+        script = (
+            "$ErrorActionPreference='Stop';"
+            "$w=New-Object -ComObject Word.Application;"
+            "$w.Visible=$false;$w.DisplayAlerts=0;"
+            "try{"
+            f"$d=$w.Documents.Open('{source}',$false,$true,$false);"
+            f"$d.SaveAs2('{target}',16);"
+            "$d.Close(0);"
+            "}finally{$w.Quit()}"
+        )
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, timeout=90)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("调用 Word 转换失败，请把文件另存为 .docx 后重试") from exc
+        if not target.is_file():
+            raise ValueError("Word 转换未生成文件，请确认本机已安装 Word，或另存为 .docx 后上传")
+        return target.read_bytes()
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def parse_roster_upload(filename, content):
     suffix = Path(filename).suffix.lower()
-    if suffix not in (".docx", ".pdf"):
-        raise ValueError("仅支持 .docx Word 文档和 .pdf 文件；旧版 .doc 请另存为 .docx")
+    if suffix not in (".docx", ".doc", ".pdf"):
+        raise ValueError("仅支持 .docx / .doc Word 文档和 .pdf 文件")
     if not content:
         raise ValueError("文件内容为空")
+    if suffix == ".doc":
+        content = convert_legacy_doc(content)
+        suffix = ".docx"
     rows = parse_docx_roster(content) if suffix == ".docx" else parse_pdf_roster(content)
     seen_qq = set()
     seen_student_ids = set()

@@ -93,7 +93,7 @@
       </section>
 
       <section class="view" id="view-roster">
-        <div class="roster-header"><div><p class="eyebrow">提交人身份映射</p><h2>提交名单</h2><p class="subtle">登记 QQ 号和学号用于归属提交；邮箱地址需核实后才可发送提醒或通知。</p></div><div class="roster-actions"><button class="primary-button compact-button" id="announcement-open" type="button">✉ 批量通知</button><label class="quiet-button file-import">导入名单 Word / PDF<input type="file" id="document-import" accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label><label class="quiet-button file-import">导入 CSV<input type="file" id="csv-import" accept=".csv,text/csv"></label><button class="quiet-button" id="roster-export">导出花名册</button></div></div>
+        <div class="roster-header"><div><p class="eyebrow">提交人身份映射</p><h2>提交名单</h2><p class="subtle">登记 QQ 号和学号用于归属提交；邮箱地址需核实后才可发送提醒或通知。</p></div><div class="roster-actions"><button class="primary-button compact-button" id="announcement-open" type="button">✉ 批量通知</button><label class="quiet-button file-import">导入名单 Word / PDF<input type="file" id="document-import" accept=".doc,.docx,.pdf,application/msword,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label><label class="quiet-button file-import">导入 CSV<input type="file" id="csv-import" accept=".csv,text/csv"></label><button class="quiet-button" id="roster-export">导出花名册</button></div></div>
         <div class="panel roster-panel">
           <form id="roster-form" class="roster-form">
             <label><span>QQ 号</span><input id="roster-qq" inputmode="numeric" required placeholder="QQ 号"></label>
@@ -106,7 +106,7 @@
           </form>
           <div class="roster-toolbar"><span id="roster-count">0 位成员</span><input id="roster-search" class="search-input" placeholder="搜索姓名、QQ 号、学号或小组"></div>
           <div class="table-wrap"><table><thead><tr><th>姓名</th><th>QQ 号</th><th>学号</th><th>班级 / 小组</th><th>邮箱</th><th>状态</th><th></th></tr></thead><tbody id="roster-table"></tbody></table></div>
-          <div class="roster-note">Word / PDF 表格需包含“姓名、学号、QQ号”列；分类列可用“班级、小组或分类”。仅支持 .docx 和可选择文字的 PDF。</div>
+          <div class="roster-note">Word / PDF 表格需包含“姓名、学号、QQ号”列；分类列可用“班级、小组或分类”。支持 .docx / .doc（老版 .doc 需本机装有 Word 自动转换）和可选择文字的 PDF，表头支持两级合并。</div>
         </div>
         <div class="announcement-history-section"><div class="history-heading"><h2>最近通知</h2><span>发送记录保存在本机</span></div><div id="announcement-history" class="history-list"><div class="history-empty">尚无批量通知记录。</div></div></div>
       </section>
