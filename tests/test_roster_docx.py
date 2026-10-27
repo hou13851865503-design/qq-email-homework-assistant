@@ -83,12 +83,26 @@ class DocxRosterTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             APP.parse_roster_upload("名单.txt", b"abc")
 
-    def test_accepts_doc_extension(self):
-        # .doc 走 Word 转换；这里只验证扩展名不再被"仅支持 .docx"拒绝
+    def test_legacy_doc_goes_through_conversion(self):
+        # .doc 必须先借本机 Word 转成 .docx，再走同一套表格解析
+        converted = build_docx(table([
+            [cell("姓名"), cell("学号"), cell("QQ号")],
+            [cell("张三"), cell("2024001"), cell("12345678")],
+        ]))
+        calls = []
+        original = APP.convert_legacy_office
+
+        def fake_convert(kind, content):
+            calls.append(kind)
+            return converted
+
+        APP.convert_legacy_office = fake_convert
         try:
-            APP.parse_roster_upload("名单.doc", b"not-a-real-doc")
-        except ValueError as exc:
-            self.assertNotIn("仅支持 .docx", str(exc))
+            rows = APP.parse_roster_upload("名单.doc", b"\xd0\xcf\x11\xe0legacy")["rows"]
+        finally:
+            APP.convert_legacy_office = original
+        self.assertEqual(calls, ["word"])
+        self.assertEqual((rows[0]["name"], rows[0]["qq_number"]), ("张三", "12345678"))
 
 
 if __name__ == "__main__":

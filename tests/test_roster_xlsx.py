@@ -204,9 +204,46 @@ class XlsxRosterTest(unittest.TestCase):
         self.assertIn("Excel", str(ctx.exception))
 
     def test_legacy_xls_suffix_accepted(self):
-        # .xls / .xlsm 走后缀白名单；老版 .xls 需要本机 Office 转换
+        # .xls / .xlsm / .xlsx 都在白名单里；老版 .xls 需要本机 Office 转换
         for suffix in (".xls", ".xlsm", ".xlsx"):
             self.assertIn(suffix, APP.ROSTER_SUFFIXES)
+
+    def test_legacy_xls_goes_through_conversion(self):
+        book = Workbook()
+        book.add_sheet([
+            [s("姓名"), s("学号"), s("QQ号")],
+            [s("张三"), n("2024001"), n("12345678")],
+        ])
+        converted = book.build()
+        calls = []
+        original = APP.convert_legacy_office
+
+        def fake_convert(kind, content):
+            calls.append(kind)
+            return converted
+
+        APP.convert_legacy_office = fake_convert
+        try:
+            rows = APP.parse_roster_upload("名单.xls", b"\xd0\xcf\x11\xe0legacy")["rows"]
+        finally:
+            APP.convert_legacy_office = original
+        self.assertEqual(calls, ["excel"])
+        self.assertEqual((rows[0]["name"], rows[0]["qq_number"]), ("张三", "12345678"))
+
+    def test_xlsx_skips_conversion(self):
+        book = Workbook()
+        book.add_sheet([
+            [s("姓名"), s("学号"), s("QQ号")],
+            [s("张三"), n("2024001"), n("12345678")],
+        ])
+        calls = []
+        original = APP.convert_legacy_office
+        APP.convert_legacy_office = lambda kind, content: calls.append(kind)
+        try:
+            APP.parse_roster_upload("名单.xlsx", book.build())
+        finally:
+            APP.convert_legacy_office = original
+        self.assertEqual(calls, [])
 
     def test_broken_xlsx_message(self):
         with self.assertRaises(ValueError) as ctx:

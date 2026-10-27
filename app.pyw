@@ -509,9 +509,11 @@ def parse_roster_upload(filename, content):
     if not content:
         raise ValueError("文件内容为空")
     kind = ROSTER_SUFFIXES[suffix]
-    if suffix in LEGACY_OFFICE:
+    legacy = LEGACY_OFFICE.get(kind)
+    if legacy and suffix == legacy["source"]:
+        # .doc / .xls 是二进制老格式，先借本机 Office 转成 .docx / .xlsx
         content = convert_legacy_office(kind, content)
-        suffix = LEGACY_OFFICE[kind]["target"]
+        suffix = legacy["target"]
     if kind == "word":
         rows = parse_docx_roster(content)
     elif kind == "excel":
