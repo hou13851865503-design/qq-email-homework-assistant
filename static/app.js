@@ -822,10 +822,17 @@ $('#send-reminders-button').addEventListener('click', async () => {
 async function init() {
   const today = new Date();
   const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  $('#start-date').value = date;
-  $('#end-date').value = date;
-  $('#start-date').max = date;
-  $('#end-date').max = date;
+  const startInput = $('#start-date');
+  const endInput = $('#end-date');
+  startInput.value = date;
+  endInput.value = date;
+  // 收件结束日期允许选未来（作业截止日通常在未来），不再设置 max；
+  // 只用 min 保证"开始 ≤ 结束"，避免选出无效区间。
+  startInput.removeAttribute('max');
+  endInput.removeAttribute('max');
+  const syncRange = () => { endInput.min = startInput.value || ''; };
+  startInput.addEventListener('change', syncRange);
+  syncRange();
   setAutoRemindHint($('#auto-remind').checked, false);
   try { await refresh(); }
   catch (error) { toast(`本机服务连接失败：${error.message}`, true); }
