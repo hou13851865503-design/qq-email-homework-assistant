@@ -320,52 +320,204 @@ def parse_pdf_roster(content):
         raise
 
 
-def convert_legacy_doc(content):
-    """把老版 .doc 用本机 Word 转成 .docx 字节流。
+XLSX_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+RELATIONSHIP_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+PACKAGE_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
-    .doc 是二进制 OLE 格式，纯 Python 解析不可靠；本机装了 Word 就借它转换。
-    没有 Word 时给明确提示，而不是抛一个看不懂的错。
-    """
-    if os.name != "nt":
-        raise ValueError("旧版 .doc 需要本机安装 Word 才能自动转换，请用 Word 另存为 .docx 后上传")
-    temp_dir = Path(tempfile.mkdtemp(prefix="roster_doc_"))
+
+def xlsx_column_index(reference):
+    """把 "A1" / "AB12" 这类单元格地址换算成 0 起的列号。"""
+    index = 0
+    for char in str(reference or ""):
+        if not char.isalpha():
+            break
+        index = index * 26 + (ord(char.upper()) - 64)
+    return max(0, index - 1)
+
+
+def xlsx_text_of(node):
+    """取一个节点下的文字：普通文本在 t，富文本在若干 r/t 里，rPh（注音）要丢掉。"""
+    if node is None:
+        return ""
+    parts = [item.text or "" for item in node.findall(f"{XLSX_NS}t")]
+    parts.extend(item.text or "" for item in node.findall(f"{XLSX_NS}r/{XLSX_NS}t"))
+    return "".join(parts).strip()
+
+
+def xlsx_shared_strings(archive):
     try:
-        source = temp_dir / "input.doc"
-        target = temp_dir / "output.docx"
+        root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+    except (KeyError, ET.ParseError):
+        return []
+    return [xlsx_text_of(item) for item in root.findall(f"{XLSX_NS}si")]
+
+
+def xlsx_sheet_paths(archive):
+    """按工作簿里的顺序返回所有工作表的 xml 路径；结构异常时退回默认路径。"""
+    fallback = ["xl/worksheets/sheet1.xml"]
+    try:
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+        rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    except (KeyError, ET.ParseError):
+        return fallback
+    targets = {}
+    for rel in rels.findall(f"{PACKAGE_REL_NS}Relationship"):
+        target = (rel.get("Target") or "").replace("\\", "/").lstrip("/")
+        if target:
+            targets[rel.get("Id") or ""] = target if target.startswith("xl/") else f"xl/{target}"
+    paths = []
+    for sheet in workbook.findall(f"{XLSX_NS}sheets/{XLSX_NS}sheet"):
+        path = targets.get(sheet.get(f"{RELATIONSHIP_NS}id") or "")
+        if path and path not in paths:
+            paths.append(path)
+    return paths or fallback
+
+
+def xlsx_cell_text(cell, shared_strings):
+    kind = (cell.get("t") or "n").lower()
+    if kind == "inlinestr":
+        return xlsx_text_of(cell.find(f"{XLSX_NS}is"))
+    value_node = cell.find(f"{XLSX_NS}v")
+    raw = (value_node.text or "") if value_node is not None else ""
+    if kind == "s":
+        try:
+            return shared_strings[int(raw)]
+        except (ValueError, IndexError):
+            return ""
+    if kind in ("str", "b", "e"):
+        return raw.strip()
+    # 数字：学号、QQ 号常被 Excel 存成数字，要还原成不带小数点和科学计数法的写法
+    text = raw.strip()
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if number.is_integer() and abs(number) < 1e15:
+        return str(int(number))
+    return text
+
+
+def xlsx_sheet_rows(root, shared_strings):
+    rows = []
+    for row_node in root.iter(f"{XLSX_NS}row"):
+        cells = {}
+        for cell in row_node.findall(f"{XLSX_NS}c"):
+            reference = cell.get("r")
+            index = xlsx_column_index(reference) if reference else len(cells)
+            text = xlsx_cell_text(cell, shared_strings)
+            if text:
+                cells[index] = text
+        if not cells:
+            rows.append([])
+            continue
+        # 合并单元格只在左上角存值，其余位置本来就空着，按最大列号补空即可对齐
+        rows.append([cells.get(index, "") for index in range(max(cells) + 1)])
+    return rows
+
+
+def parse_xlsx_roster(content):
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            shared_strings = xlsx_shared_strings(archive)
+            sheets = []
+            for path in xlsx_sheet_paths(archive):
+                try:
+                    info = archive.getinfo(path)
+                except KeyError:
+                    continue
+                if info.file_size > 32 * 1024 * 1024:
+                    raise ValueError("Excel 工作表内容过大，请精简后重试")
+                try:
+                    sheets.append(ET.fromstring(archive.read(path)))
+                except ET.ParseError:
+                    continue
+    except zipfile.BadZipFile as exc:
+        raise ValueError("无法读取此 Excel 文件，请上传有效的 .xlsx 文档") from exc
+
+    if not sheets:
+        raise ValueError("无法读取此 Excel 文件，请上传有效的 .xlsx 文档")
+    first_error = None
+    for sheet in sheets:
+        try:
+            return parse_roster_rows(xlsx_sheet_rows(sheet, shared_strings))
+        except ValueError as exc:
+            first_error = first_error or exc
+    raise first_error
+
+
+# 老版二进制格式（.doc / .xls）纯 Python 解析不可靠，借本机 Office 转成新格式
+LEGACY_OFFICE = {
+    "word": {
+        "source": ".doc", "target": ".docx", "app": "Word.Application", "format": 16,
+        "open": "$d=$w.Documents.Open('{source}',$false,$true,$false);$d.SaveAs2('{target}',16);$d.Close(0);",
+        "hint": "请用 Word 另存为 .docx 后上传",
+    },
+    "excel": {
+        "source": ".xls", "target": ".xlsx", "app": "Excel.Application", "format": 51,
+        "open": "$b=$x.Workbooks.Open('{source}',0,$true);$b.SaveAs('{target}',51);$b.Close($false);",
+        "hint": "请用 Excel 另存为 .xlsx 后上传",
+    },
+}
+
+
+def convert_legacy_office(kind, content):
+    """把老版 .doc / .xls 用本机 Office 转成 .docx / .xlsx 字节流。
+
+    没有对应 Office 时给明确提示，而不是抛一个看不懂的错。
+    """
+    config = LEGACY_OFFICE[kind]
+    if os.name != "nt":
+        raise ValueError(f"旧版 {config['source']} 需要本机安装 Office 才能自动转换，{config['hint']}")
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"roster_{kind}_"))
+    try:
+        source = temp_dir / f"input{config['source']}"
+        target = temp_dir / f"output{config['target']}"
         source.write_bytes(content)
-        script = (
-            "$ErrorActionPreference='Stop';"
-            "$w=New-Object -ComObject Word.Application;"
-            "$w.Visible=$false;$w.DisplayAlerts=0;"
-            "try{"
-            f"$d=$w.Documents.Open('{source}',$false,$true,$false);"
-            f"$d.SaveAs2('{target}',16);"
-            "$d.Close(0);"
-            "}finally{$w.Quit()}"
-        )
+        if kind == "word":
+            body = "$w=New-Object -ComObject Word.Application;$w.Visible=$false;$w.DisplayAlerts=0;"
+            body += "try{" + config["open"].format(source=source, target=target) + "}finally{$w.Quit()}"
+        else:
+            body = "$x=New-Object -ComObject Excel.Application;$x.Visible=$false;$x.DisplayAlerts=$false;"
+            body += "try{" + config["open"].format(source=source, target=target) + "}finally{$x.Quit()}"
+        script = "$ErrorActionPreference='Stop';" + body
         try:
             subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                 capture_output=True, timeout=90)
         except (OSError, subprocess.SubprocessError) as exc:
-            raise ValueError("调用 Word 转换失败，请把文件另存为 .docx 后重试") from exc
+            raise ValueError(f"调用 Office 转换失败，{config['hint']}") from exc
         if not target.is_file():
-            raise ValueError("Word 转换未生成文件，请确认本机已安装 Word，或另存为 .docx 后上传")
+            raise ValueError(f"转换未生成文件，请确认本机已安装 Office，{config['hint']}")
         return target.read_bytes()
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+ROSTER_SUFFIXES = {
+    ".docx": "word", ".doc": "word",
+    ".xlsx": "excel", ".xlsm": "excel", ".xls": "excel",
+    ".pdf": "pdf",
+}
+
+
 def parse_roster_upload(filename, content):
     suffix = Path(filename).suffix.lower()
-    if suffix not in (".docx", ".doc", ".pdf"):
-        raise ValueError("仅支持 .docx / .doc Word 文档和 .pdf 文件")
+    if suffix not in ROSTER_SUFFIXES:
+        raise ValueError("仅支持 Word（.docx / .doc）、Excel（.xlsx / .xls）和 PDF 文件")
     if not content:
         raise ValueError("文件内容为空")
-    if suffix == ".doc":
-        content = convert_legacy_doc(content)
-        suffix = ".docx"
-    rows = parse_docx_roster(content) if suffix == ".docx" else parse_pdf_roster(content)
+    kind = ROSTER_SUFFIXES[suffix]
+    if suffix in LEGACY_OFFICE:
+        content = convert_legacy_office(kind, content)
+        suffix = LEGACY_OFFICE[kind]["target"]
+    if kind == "word":
+        rows = parse_docx_roster(content)
+    elif kind == "excel":
+        rows = parse_xlsx_roster(content)
+    else:
+        rows = parse_pdf_roster(content)
     seen_qq = set()
     seen_student_ids = set()
     for row in rows:
