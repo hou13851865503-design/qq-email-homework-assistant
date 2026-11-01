@@ -38,6 +38,23 @@ DB_PATH = DATA_DIR / "assistant.sqlite3"
 DATA_DIR.mkdir(exist_ok=True)
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
+
+def _build_id() -> str:
+    """当前这份代码的版本标记。
+
+    用本文件的大小+修改时间拼一个串。作用是让"已经在跑的那个进程"能证明
+    自己跑的就是磁盘上这份代码：否则改完代码重启，新进程看到 8765 上有同名
+    应用就直接打开它的页面并退出，用户永远跑的是旧代码，还以为是改动没生效。
+    """
+    try:
+        stat = Path(__file__).resolve().stat()
+        return f"{stat.st_size}-{int(stat.st_mtime)}"
+    except OSError:
+        return "unknown"
+
+
+BUILD = _build_id()
+
 SESSION = {"account": None, "auth_code": None}
 SESSION_LOCK = threading.Lock()
 
@@ -1123,7 +1140,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
-            return self.send_json({"ok": True, "name": "QQ作业助手", "app_dir": str(APP_DIR)})
+            return self.send_json({"ok": True, "name": "QQ作业助手", "app_dir": str(APP_DIR),
+                                   "build": BUILD})
         if parsed.path == "/api/state":
             with db() as conn:
                 roster = [dict(row) for row in conn.execute("SELECT * FROM roster ORDER BY group_name, qq_number")]
@@ -1224,6 +1242,15 @@ class Handler(BaseHTTPRequestHandler):
                 content = self.read_roster_upload()
                 return self.send_json(parse_roster_upload(filename, content))
             data = self.read_json()
+            if path == "/api/shutdown":
+                # 供"新代码实例替换旧代码实例"使用：旧进程占着 8765 不放，
+                # 新进程没法接管，用户就会一直跑旧代码。仅接受本机回环来源。
+                peer = self.client_address[0] if self.client_address else ""
+                if peer not in ("127.0.0.1", "::1"):
+                    return self.send_json({"error": "仅允许本机调用"}, 403)
+                log_line(f"收到新实例的替换请求，版本 {BUILD} 退出")
+                threading.Timer(0.3, self.server.shutdown).start()
+                return self.send_json({"ok": True, "build": BUILD})
             if path == "/api/connect":
                 account = str(data.get("account", "")).strip().lower()
                 auth_code = str(data.get("auth_code", "")).strip().replace(" ", "")
@@ -1740,6 +1767,39 @@ def auto_remind_loop():
             continue
 
 
+def _probe_instance(port: int, timeout: float = 0.6):
+    """探测这个端口上是不是本应用的实例；是则返回它的 health 信息。
+
+    必须显式禁用代理（ProxyHandler({})）：用户开着系统代理（FlClash 等）时，
+    urllib 默认会把 127.0.0.1 的请求也交给代理，探测必然失败，于是程序误判
+    "这不是我的实例"，每次启动都新开一个端口，堆出一串进程。
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{port}/api/health", timeout=timeout) as response:
+            state = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    if state.get("name") != "QQ作业助手":
+        return None
+    if state.get("app_dir") != str(APP_DIR):
+        return None
+    return state
+
+
+def _ask_old_instance_to_quit(port: int) -> bool:
+    """请求旧进程退出，好让新代码接管这个端口。"""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/shutdown", data=b"{}",
+            headers={"Content-Type": "application/json"}, method="POST")
+        with opener.open(request, timeout=2) as response:
+            return bool(json.loads(response.read().decode("utf-8")).get("ok"))
+    except Exception:
+        return False
+
+
 def find_port():
     candidates = [8765] + list(range(8766, 8796))
     for candidate in candidates:
@@ -1750,14 +1810,27 @@ def find_port():
             return candidate
         except OSError:
             probe.close()
-            try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{candidate}/api/health", timeout=0.5) as response:
-                    state = json.loads(response.read().decode("utf-8"))
-                    if state.get("name") == "QQ作业助手" and state.get("app_dir") == str(APP_DIR):
-                        webbrowser.open(f"http://127.0.0.1:{candidate}")
-                        return None
-            except Exception:
-                pass
+        info = _probe_instance(candidate)
+        if info is None:
+            continue
+        if info.get("build") == BUILD:
+            # 同一个版本：就是要复用的那个实例，直接打开它的页面
+            webbrowser.open(f"http://127.0.0.1:{candidate}")
+            return None
+        # 端口被**旧版本**占着。以前这里只看应用名和路径，于是代码更新后
+        # 依然会被旧进程"截胡"——用户以为重启了，其实跑的还是旧代码。
+        log_line(f"端口 {candidate} 上是旧版本 {info.get('build')}（本版本 {BUILD}），请求其退出")
+        if _ask_old_instance_to_quit(candidate):
+            for _ in range(40):  # 最多等 4 秒让旧进程释放端口
+                time.sleep(0.1)
+                again = socket.socket()
+                try:
+                    again.bind(("127.0.0.1", candidate))
+                    again.close()
+                    return candidate
+                except OSError:
+                    again.close()
+        log_line(f"端口 {candidate} 未能释放，改用下一个端口")
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
