@@ -111,13 +111,13 @@
         <div class="announcement-history-section"><div class="history-heading"><h2>最近通知</h2><span>发送记录保存在本机</span></div><div id="announcement-history" class="history-list"><div class="history-empty">尚无批量通知记录。</div></div></div>
       </section>
 
-      <footer class="footer-note"><span>本机服务 · 127.0.0.1</span><span>授权码仅在当前运行期间保存在内存中</span></footer>
+      <footer class="footer-note"><span>本机服务 · 127.0.0.1</span><span>授权码加密保存在本机，仅当前 Windows 账户可解密</span></footer>
     </main>
   </div>
 
   <dialog id="connection-dialog" class="modal">
     <form method="dialog" class="modal-close-row"><button class="icon-button" aria-label="关闭">×</button></form>
-    <p class="eyebrow">邮箱设置</p><h2>连接 QQ 邮箱</h2><p class="subtle">使用邮箱账号和客户端授权码。请先在 QQ 邮箱开启 IMAP/SMTP 服务；授权码不会写入本机文件。</p>
+    <p class="eyebrow">邮箱设置</p><h2>连接 QQ 邮箱</h2><p class="subtle">使用邮箱账号和客户端授权码。请先在 QQ 邮箱开启 IMAP/SMTP 服务；勾选「记住此设备」后，重启程序会自动用本机保存的授权码连接。</p>
     <form id="connection-form" class="modal-form">
       <label><span>QQ 邮箱地址</span><input id="mail-account" type="email" autocomplete="off" required placeholder="例如：12345678@qq.com"></label>
       <label><span>客户端授权码</span><input id="mail-auth-code" type="password" autocomplete="new-password" required placeholder="保存在本机，仅当前 Windows 账户可解密"></label>

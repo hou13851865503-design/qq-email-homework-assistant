@@ -45,7 +45,31 @@ SESSION_LOCK = threading.Lock()
 # 账号与授权码用 Windows DPAPI 加密后保存在 data/session.bin，
 # 只有当前 Windows 账户能解密；data/ 已在 .gitignore 中，不会进仓库。
 SESSION_FILE = DATA_DIR / "session.bin"
-SESSION_CACHE = {"saved_account": "", "auto_state": "idle", "auto_error": ""}
+SESSION_CACHE = {"saved_account": "", "auto_state": "idle", "auto_error": "", "saved_error": ""}
+LOG_FILE = DATA_DIR / "app.log"
+LOG_MAX_BYTES = 512 * 1024
+
+
+def log_line(message: str) -> None:
+    """写一行诊断日志到 data/app.log。
+
+    这是 .pyw 程序，没有控制台，print 谁也看不见；而"授权码为什么没被记住"
+    这类问题恰恰需要事后留痕。按大小滚动一份 .1，避免长期运行把磁盘写满。
+    """
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > LOG_MAX_BYTES:
+            backup = LOG_FILE.with_suffix(".log.1")
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                pass
+            LOG_FILE.replace(backup)
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        with LOG_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{stamp}] {message}\n")
+    except Exception:
+        pass  # 日志写不进去绝不能影响业务
+
 
 
 def _dpapi(data: bytes, protect: bool) -> bytes:
@@ -93,16 +117,69 @@ def save_session(account: str, auth_code: str) -> None:
 
 
 def load_session() -> tuple[str, str]:
+    """读出本机保存的凭据。永远不抛异常，失败原因写进 SESSION_CACHE["saved_error"]。
+
+    以前这里是一句 `except Exception: pass`，密文解不开（换了 Windows 账户、
+    文件被截断、DPAPI 策略变更）时既没有日志也没有提示，用户看到的只是
+    "又要重新登录"，排查时完全没线索。现在把原因留下来。
+    """
+    SESSION_CACHE["saved_error"] = ""
+    if not SESSION_FILE.exists():
+        return "", ""
     try:
         data = json.loads(_dpapi(SESSION_FILE.read_bytes(), False).decode("utf-8"))
-        account = str(data.get("account") or "")
-        auth_code = str(data.get("auth_code") or "")
-        if account and auth_code:
-            SESSION_CACHE["saved_account"] = account
-            return account, auth_code
-    except Exception:
-        pass
+    except OSError as exc:
+        # 最常见：文件属于另一个 Windows 账户，或 DPAPI 主密钥变了
+        SESSION_CACHE["saved_error"] = f"本机保存的凭据解密失败（{exc}），可能换了 Windows 账户"
+        log_line(SESSION_CACHE["saved_error"])
+        return "", ""
+    except Exception as exc:
+        SESSION_CACHE["saved_error"] = f"凭据文件已损坏（{type(exc).__name__}）"
+        log_line(SESSION_CACHE["saved_error"])
+        return "", ""
+    if not isinstance(data, dict):
+        SESSION_CACHE["saved_error"] = "凭据文件内容格式异常"
+        log_line(SESSION_CACHE["saved_error"])
+        return "", ""
+    account = str(data.get("account") or "")
+    auth_code = str(data.get("auth_code") or "")
+    if account and auth_code:
+        SESSION_CACHE["saved_account"] = account
+        return account, auth_code
+    SESSION_CACHE["saved_error"] = "凭据文件缺少账号或授权码"
+    log_line(SESSION_CACHE["saved_error"])
     return "", ""
+
+
+def classify_login_error(exc: Exception) -> tuple[str, str]:
+    """把登录异常分成 (kind, 人话)。
+
+    以前一律显示"请使用最新客户端授权码"，网络断了也这么说，用户就去
+    白白重新生成一次授权码，反而把原本有效的授权码作废了。
+    """
+    if isinstance(exc, imaplib.IMAP4.error):
+        text = str(exc)
+        # QQ 邮箱在未开启 IMAP 服务时也可能返回认证类错误，文案里都带上开启项
+        if "LOGIN" in text.upper() or "AUTH" in text.upper() or not text.strip():
+            return "auth", "授权码已被拒绝（可能已在 QQ 邮箱重新生成过或已作废）。请到 QQ 邮箱「设置 → 账户」重新生成授权码后填写。"
+        return "auth", f"邮箱拒绝了登录：{text}"
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "network", "连接 imap.qq.com 超时，请检查网络后重试。"
+    if isinstance(exc, OSError):
+        return "network", f"连不上 imap.qq.com（{exc}），请检查网络或代理设置。"
+    return "unknown", f"登录失败：{type(exc).__name__}: {exc}"
+
+
+def prime_session_cache() -> None:
+    """启动时同步预读一次凭据，只解密、不联网。
+
+    这一步是为"打开即已连接"服务的：`has_saved` 之前只在后台线程执行到
+    load_session() 时才有值，而浏览器 0.7 秒就打开了页面，那一刻接口返回
+    has_saved=False，界面显示"点击连接 QQ 邮箱" —— 用户以为授权码没保存。
+    DPAPI 解密几百字节只要毫秒级，完全可以在起服务前同步做完。
+    """
+    account, _ = load_session()
+    SESSION_CACHE["auto_state"] = "connecting" if account else "idle"
 
 
 def clear_session() -> None:
@@ -1069,7 +1146,8 @@ class Handler(BaseHTTPRequestHandler):
                 account = SESSION["account"]
             return self.send_json({"roster": roster, "tasks": tasks, "groups": groups, "announcements": announcements, "connected": bool(account), "account": account or "",
                                    "has_saved": bool(SESSION_CACHE["saved_account"]), "saved_account": SESSION_CACHE["saved_account"],
-                                   "auto_state": SESSION_CACHE["auto_state"], "auto_error": SESSION_CACHE["auto_error"]})
+                                   "auto_state": SESSION_CACHE["auto_state"], "auto_error": SESSION_CACHE["auto_error"],
+                                   "saved_error": SESSION_CACHE.get("saved_error", "")})
         if parsed.path == "/api/status":
             with db() as conn:
                 task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
@@ -1153,15 +1231,28 @@ class Handler(BaseHTTPRequestHandler):
                 if not re.fullmatch(r"[^@\s]+@[^@\s]+", account) or not auth_code:
                     raise ValueError("请填写完整邮箱地址和客户端授权码")
                 try_login(account, auth_code)
-                with SESSION_LOCK:
-                    SESSION.update(account=account, auth_code=auth_code)
+                # 先落盘再认连接：原来先 SESSION.update() 再 save_session()，
+                # 一旦 DPAPI/磁盘写入失败就返回"操作失败"，但内存里其实已经连上了，
+                # 用户看到失败会再点一次，越点越乱。现在落盘失败只降级提示。
+                saved, save_error = True, ""
                 if remember:
-                    save_session(account, auth_code)
+                    try:
+                        save_session(account, auth_code)
+                    except Exception as exc:
+                        saved = False
+                        save_error = f"{type(exc).__name__}: {exc}"
+                        log_line(f"保存凭据失败：{save_error}")
                 else:
                     clear_session()
+                with SESSION_LOCK:
+                    SESSION.update(account=account, auth_code=auth_code)
                 SESSION_CACHE["auto_state"] = "ok"
                 SESSION_CACHE["auto_error"] = ""
-                return self.send_json({"ok": True, "account": account, "remember": remember})
+                SESSION_CACHE["saved_error"] = "" if saved else f"未能保存到本机：{save_error}"
+                SESSION_CACHE["saved_account"] = account if saved else ""
+                return self.send_json({"ok": True, "account": account,
+                                       "remember": remember and saved, "saved": saved,
+                                       "save_error": save_error})
             if path == "/api/auto-connect":
                 # 一键连接：用本机已保存（DPAPI 加密）的凭据直接登录
                 with SESSION_LOCK:
@@ -1170,14 +1261,25 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"ok": True, "account": current, "already": True})
                 account, auth_code = load_session()
                 if not account:
-                    return self.send_json({"ok": False, "error": "本机没有保存的连接信息"}, 400)
+                    reason = SESSION_CACHE.get("saved_error") or ""
+                    return self.send_json({
+                        "ok": False,
+                        "error": f"本机没有可用的连接信息。{reason}请重新填写账号和授权码。" if reason
+                                 else "本机没有保存的连接信息",
+                        "need_login": True,
+                    }, 400)
                 SESSION_CACHE["auto_state"] = "connecting"
                 try:
                     try_login(account, auth_code)
                 except Exception as exc:
+                    kind, message = classify_login_error(exc)
                     SESSION_CACHE["auto_state"] = "error"
-                    SESSION_CACHE["auto_error"] = f"自动连接失败：{exc}"
-                    return self.send_json({"ok": False, "error": SESSION_CACHE["auto_error"]}, 400)
+                    SESSION_CACHE["auto_error"] = message
+                    log_line(f"一键连接失败[{kind}]：{message}")
+                    # 刻意不删本机凭据：网络抖动不该让用户重新生成授权码。
+                    # 只有用户自己点「断开并忘记」才清除。
+                    return self.send_json({"ok": False, "error": message,
+                                           "kind": kind, "need_login": kind == "auth"}, 400)
                 with SESSION_LOCK:
                     SESSION.update(account=account, auth_code=auth_code)
                 SESSION_CACHE["auto_state"] = "ok"
@@ -1667,22 +1769,32 @@ def startup_auto_connect():
     """启动时用本机保存的凭据自动连接（实现"打开即已连接"）。"""
     account, auth_code = load_session()
     if not account:
+        SESSION_CACHE["auto_state"] = "idle"
         return
     SESSION_CACHE["auto_state"] = "connecting"
     try:
         try_login(account, auth_code)
     except Exception as exc:
+        kind, message = classify_login_error(exc)
         SESSION_CACHE["auto_state"] = "error"
-        SESSION_CACHE["auto_error"] = f"自动连接失败：{exc}"
+        SESSION_CACHE["auto_error"] = message
+        # saved_account 保留：凭据还在本机，界面应显示"已记住 xxx，点击重连"，
+        # 而不是退回"未连接"让用户以为又要重新生成授权码。
+        log_line(f"启动自动连接失败[{kind}]：{message}")
         return
     with SESSION_LOCK:
         SESSION.update(account=account, auth_code=auth_code)
     SESSION_CACHE["auto_state"] = "ok"
     SESSION_CACHE["auto_error"] = ""
+    log_line(f"启动自动连接成功：{account}")
 
 
 def main():
     initialize()
+    # 起服务之前同步读一次凭据：只做 DPAPI 解密（毫秒级），不联网。
+    # 这样浏览器 0.7 秒后打开时 has_saved 已经是正确值，界面直接显示
+    # "已记住 xxx"，而不是误导性的"点击连接 QQ 邮箱"。
+    prime_session_cache()
     port = find_port()
     if port is None:
         return

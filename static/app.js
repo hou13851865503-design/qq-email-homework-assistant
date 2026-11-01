@@ -55,19 +55,51 @@ async function refresh() {
   state.tasks = data.tasks;
   state.announcements = data.announcements || [];
   state.connected = data.connected;
-  $('#account-label').textContent = data.connected ? data.account : (data.has_saved ? '一键连接' : '连接邮箱');
+  const connecting = data.auto_state === 'connecting';
+  $('#account-label').textContent = data.connected
+    ? data.account
+    : (connecting ? '连接中…' : (data.has_saved ? '一键连接' : '连接邮箱'));
   $('#account-dot').classList.toggle('connected', data.connected);
   $('#account-open').title = data.connected
     ? `已连接 ${data.account}`
-    : (data.has_saved ? `已记住 ${data.saved_account}，点击即可一键连接` : '点击连接 QQ 邮箱');
+    : (connecting ? `正在用本机保存的授权码连接 ${data.saved_account || 'QQ 邮箱'}…`
+    : (data.has_saved ? `已记住 ${data.saved_account}，点击即可一键连接` : '点击连接 QQ 邮箱'));
   if (!state.autoErrShown && data.auto_state === 'error') {
     state.autoErrShown = true;
     toast(data.auto_error || '自动连接失败，请重新填写授权码', true);
   }
+  if (!state.autoErrShown && !data.connected && data.saved_error) {
+    state.autoErrShown = true;
+    toast(data.saved_error, true);
+  }
+  // 启动自动连接是后台线程，首屏很可能还停在 connecting。
+  // 以前只请求一次 state、不轮询，于是自动连接 1 秒后成功了界面也不更新，
+  // 用户看到的是"未连接"，自然以为授权码没被记住。
+  if (connecting) scheduleConnectingPoll();
   renderGroupFilter(data.groups);
   renderRoster();
   renderHistory();
   renderAnnouncementHistory();
+}
+
+let connectingTimer = null;
+let connectingDeadline = 0;
+
+function scheduleConnectingPoll() {
+  if (connectingTimer) return;
+  if (!connectingDeadline) connectingDeadline = Date.now() + 60000; // 最多盯 60 秒
+  if (Date.now() > connectingDeadline) return;
+  connectingTimer = setTimeout(async () => {
+    connectingTimer = null;
+    try {
+      const data = await api('/api/state');
+      if (data.auto_state === 'connecting') { scheduleConnectingPoll(); return; }
+      connectingDeadline = 0;
+      await refresh();
+    } catch (e) {
+      connectingDeadline = 0;
+    }
+  }, 700);
 }
 
 function renderGroupFilter(groups) {
@@ -366,11 +398,17 @@ $('#connection-form').addEventListener('submit', async event => {
     const account = $('#mail-account').value.trim();
     const authCode = $('#mail-auth-code').value;
     const remember = $('#remember-account').checked;
-    await api('/api/connect', { method: 'POST', body: { account, auth_code: authCode, remember } });
+    const result = await api('/api/connect', { method: 'POST', body: { account, auth_code: authCode, remember } });
     $('#mail-auth-code').value = '';
     $('#connection-dialog').close();
     await refresh();
-    toast(remember ? '邮箱连接成功，已记住此设备，下次打开自动连接。' : '邮箱连接成功（未记住，下次需重新输入授权码）。');
+    // 服务端可能"连上了但没写进本机"（DPAPI/磁盘异常）。这时必须说清楚，
+    // 否则用户下次启动又要重新输入，还以为是自己没勾"记住此设备"。
+    if (remember && result && result.saved === false) {
+      toast(`已连接，但没能保存到本机（${result.save_error || '未知原因'}），下次启动仍需重新输入授权码。`, true);
+    } else {
+      toast(remember ? '邮箱连接成功，已记住此设备，下次打开自动连接。' : '邮箱连接成功（未记住，下次需重新输入授权码）。');
+    }
   } catch (error) { toast(error.message, true); }
   finally { setBusy(form, false); }
 });
