@@ -1518,6 +1518,7 @@ class Handler(BaseHTTPRequestHandler):
                     if len(uids) > 3000:
                         raise ValueError("时间范围内邮件超过 3000 封，请缩小日期范围")
                     candidates = []
+                    diagnostics = {"with_attachment": 0, "keyword_matched": 0, "label_blocked": 0}
                     with db() as conn:
                         roster = conn.execute("SELECT * FROM roster WHERE active=1").fetchall()
                     for uid in uids:
@@ -1560,6 +1561,8 @@ class Handler(BaseHTTPRequestHandler):
                             "body": body.casefold(),
                         }
                         matches = []
+                        keyword_ok_any = False   # 这封邮件至少有一个附件命中关键词
+                        label_blocked = False    # 命中关键词，但卡在「固定作业标识」上
                         for attachment in pdfs:
                             haystack["filename"] = attachment["filename"].casefold()
                             relevant = [haystack[field] for field in fields]
@@ -1569,8 +1572,19 @@ class Handler(BaseHTTPRequestHandler):
                                 matched = all(checks) if mode == "all" else any(checks)
                             else:
                                 matched = True
+                            if matched:
+                                keyword_ok_any = True
+                                if not fixed_match:
+                                    label_blocked = True
                             if fixed_match and matched:
                                 matches.append(attachment)
+                        # 统计被哪一道关卡筛掉，供前端解释「为什么 0 个文件」。
+                        # 关键词写对了却显示 0，绝大多数是被固定作业标识挡住的。
+                        diagnostics["with_attachment"] += 1
+                        if keyword_ok_any:
+                            diagnostics["keyword_matched"] += 1
+                        if not matches and label_blocked:
+                            diagnostics["label_blocked"] += 1
                         if not matches:
                             continue
                         identity_texts = [haystack[field] for field in fields if field != "filename"]
@@ -1604,7 +1618,10 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
                 with db() as conn:
-                    return self.send_json(task_summary(conn, task_id))
+                    summary = task_summary(conn, task_id)
+                summary["diagnostics"] = diagnostics
+                summary["assignment_label"] = assignment_label
+                return self.send_json(summary)
             match = re.fullmatch(r"/api/tasks/(\d+)/download", path)
             if match:
                 task_id = int(match.group(1))

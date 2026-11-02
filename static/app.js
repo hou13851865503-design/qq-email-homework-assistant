@@ -18,13 +18,13 @@ async function api(path, options = {}) {
   return result;
 }
 
-function toast(message, error = false) {
+function toast(message, error = false, ms = 3600) {
   const node = $('#toast');
   node.textContent = message;
   node.classList.toggle('error', error);
   node.classList.add('visible');
   clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => node.classList.remove('visible'), 3600);
+  state.toastTimer = setTimeout(() => node.classList.remove('visible'), ms);
 }
 
 function setBusy(form, busy, label) {
@@ -116,7 +116,9 @@ function renderGroupFilter(groups) {
 function renderRoster() {
   const search = ($('#roster-search')?.value || '').trim().toLowerCase();
   const filtered = state.roster.filter(member => [member.name, member.qq_number, member.student_id, member.group_name, member.email].some(value => String(value || '').toLowerCase().includes(search)));
-  $('#roster-count').textContent = `${state.roster.length} 位成员`;
+  $('#roster-count').textContent = search
+    ? `${filtered.length} / ${state.roster.length} 位成员`
+    : `${state.roster.length} 位成员`;
   $('#roster-table').innerHTML = filtered.length ? filtered.map(member => `
     <tr>
       <td>${esc(member.name)}</td><td>${esc(member.qq_number)}</td><td>${esc(member.student_id || '—')}</td><td>${esc(member.group_name || '—')}</td>
@@ -298,7 +300,10 @@ function renderSubmissionVis(data) {
   const pct = total ? Math.round(submitted / total * 100) : 0;
 
   const canvas = $('#vis-canvas');
-  const size = canvas.width || 160;
+  // 逻辑尺寸必须取自容器宽度。不能用 canvas.width：上一轮渲染已经把它
+  // 改成了「物理像素」（逻辑尺寸 × dpr），再拿它当逻辑尺寸就会每重绘一次
+  // 再乘一次 dpr，圆圈会指数级膨胀（125% 缩放下点几次就撑破卡片）。
+  const size = (canvas.parentElement && canvas.parentElement.clientWidth) || 160;
   const dpr = window.devicePixelRatio || 1;
   canvas.width = size * dpr;
   canvas.height = size * dpr;
@@ -439,7 +444,14 @@ $('#scan-form').addEventListener('submit', async event => {
     renderTask(data);
     await refresh();
     showView('overview');
-    toast(`统计完成：找到 ${data.counts.files} 个附件，${data.counts.missing} 人未提交`);
+    const diag = data.diagnostics || {};
+    if (data.counts.files === 0 && diag.label_blocked) {
+      // 关键词写对了却 0 个文件，几乎都是被「固定作业标识」挡住的。
+      // 不解释清楚，用户只会以为关键词搜索坏了。
+      toast(`没有文件入选：${diag.label_blocked} 封邮件命中了关键词，但主题 / 正文 / 文件名里都没有固定作业标识「${data.assignment_label || ''}」。清空这一项再扫一次即可。`, true, 9000);
+    } else {
+      toast(`统计完成：找到 ${data.counts.files} 个附件，${data.counts.missing} 人未提交`);
+    }
   } catch (error) { toast(error.message, true); }
   finally { setBusy(form, false); }
 });
