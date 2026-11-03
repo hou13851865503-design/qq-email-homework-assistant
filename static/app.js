@@ -439,22 +439,37 @@ $('#scan-form').addEventListener('submit', async event => {
     keywords, keyword_mode: $('input[name="keyword-mode"]:checked').value, keyword_fields: fields,
   };
   setBusy(form, true, '正在按条件扫描…');
+  $('#scan-note').hidden = true;   // 先清掉上一次的提示，避免误读
   try {
     const data = await api('/api/scan', { method: 'POST', body });
     renderTask(data);
     await refresh();
     showView('overview');
-    const diag = data.diagnostics || {};
-    if (data.counts.files === 0 && diag.label_blocked) {
-      // 关键词写对了却 0 个文件，几乎都是被「固定作业标识」挡住的。
-      // 不解释清楚，用户只会以为关键词搜索坏了。
-      toast(`没有文件入选：${diag.label_blocked} 封邮件命中了关键词，但主题 / 正文 / 文件名里都没有固定作业标识「${data.assignment_label || ''}」。清空这一项再扫一次即可。`, true, 9000);
-    } else {
-      toast(`统计完成：找到 ${data.counts.files} 个附件，${data.counts.missing} 人未提交`);
-    }
+    showScanNote(data);
+    toast(`统计完成：找到 ${data.counts.files} 个附件，${data.counts.missing} 人未提交`);
   } catch (error) { toast(error.message, true); }
   finally { setBusy(form, false); }
 });
+
+// 扫描后常驻提示：固定作业标识挡掉了多少封。
+// 只在「0 个文件」时提示是不够的——上次用户命中了 4 个文件、另有 4 封被静默排除，
+// 照样以为是自己漏扫了。
+function showScanNote(data) {
+  const note = $('#scan-note');
+  const diag = (data && data.diagnostics) || {};
+  const blocked = diag.label_blocked || 0;
+  const files = (data && data.counts && data.counts.files) || 0;
+  if (!blocked) {
+    note.hidden = true;
+    note.textContent = '';
+    return;
+  }
+  const label = data.assignment_label || '';
+  note.textContent = files === 0
+    ? `没有文件入选：${blocked} 封邮件命中了关键词，但主题 / 正文 / 文件名里都没有固定作业标识「${label}」。清空这一项再扫一次即可。`
+    : `已收录 ${files} 个文件；另有 ${blocked} 封命中了关键词，但因不含固定作业标识「${label}」被排除。若这些也属于本次作业，清空该栏再扫一次。`;
+  note.hidden = false;
+}
 
 // 勾选/取消「截止后自动提醒」：立即更新状态行；若当前已加载任务，则直接改该任务并同步徽标
 $('#auto-remind').addEventListener('change', async event => {

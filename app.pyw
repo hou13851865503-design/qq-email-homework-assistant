@@ -901,8 +901,14 @@ def export_folder_for(task):
 
 
 def copy_into_folder(items, folder):
-    """把下载好的文件（连同 .source.json 来源清单）复制到目标文件夹。"""
+    """把下载好的文件复制到目标文件夹。
+
+    来源清单（<文件名>.source.json）改放到子目录 `来源清单/`：它记录发件人、
+    Message-ID、UID 与 SHA-256，是核对来源用的，但和作业文件混在一起时
+    用户会以为是自己多出来的垃圾文件。
+    """
     copied = 0
+    manifest_dir = folder / "来源清单"
     for item in items:
         source = Path(item["path"])
         if not source.is_file():
@@ -915,7 +921,8 @@ def copy_into_folder(items, folder):
         manifest = source.with_name(source.name + ".source.json")
         if manifest.is_file():
             try:
-                shutil.copy2(manifest, folder / manifest.name)
+                manifest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(manifest, manifest_dir / manifest.name)
             except Exception:
                 pass
     return copied
